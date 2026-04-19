@@ -1,0 +1,10 @@
+# ダッシュボード専用の軽量依存（Streamlit Cloud / Railway 等のデプロイ向け）
+# 動画解析（YOLO/MediaPipe/Whisper）はここには含めない。
+# run.py をローカル実行する場合は親の requirements.txt を使う。
+
+streamlit>=1.30.0
+pandas>=2.0.0
+plotly>=5.18.0
+supabase>=2.0.0
+anthropic>=0.39.0
+python-dotenv>=1.0.0
