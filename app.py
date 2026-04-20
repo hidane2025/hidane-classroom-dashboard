@@ -1,8 +1,7 @@
-"""HIDANE Classroom Intelligence — 3層ダッシュボード
+"""HIDANE Classroom Intelligence — 3層ダッシュボード (v2: 動画プレーヤー統合)
 
 使い方:
-    source ../.venv/bin/activate
-    streamlit run dashboard/app.py
+    streamlit run app.py
 
 ビュー:
     - 社長ビュー（全17教室俯瞰）
