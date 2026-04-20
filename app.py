@@ -623,6 +623,14 @@ def view_admin():
         render_no_db_notice()
         return
 
+    # rerun 後も表示を持続させるフラッシュメッセージ
+    flash = st.session_state.pop("admin_flash", None)
+    if flash:
+        if flash["level"] == "success":
+            st.success(flash["msg"])
+        else:
+            st.error(flash["msg"])
+
     tab1, tab2, tab3 = st.tabs(["教室マスタ", "講師マスタ", "授業履歴"])
 
     # ====== 教室マスタ ======
@@ -649,11 +657,11 @@ def view_admin():
                 else:
                     r = create_classroom(name=new_room_name.strip(), region=new_room_region.strip() or None)
                     if r.get("error"):
-                        st.error(f"登録失敗: {r['error']}")
+                        st.session_state["admin_flash"] = {"level": "error", "msg": f"教室登録失敗: {r['error']}"}
                     else:
-                        st.success(f"✅ 教室「{r['name']}」を登録しました")
-                        st.cache_data.clear()
-                        st.rerun()
+                        st.session_state["admin_flash"] = {"level": "success", "msg": f"✅ 教室「{r['name']}」を登録しました"}
+                    st.cache_data.clear()
+                    st.rerun()
 
         if rooms:
             st.markdown("#### 🚫 教室を非アクティブ化")
@@ -683,7 +691,6 @@ def view_admin():
                     "教室": (t.get("classrooms") or {}).get("name", "—"),
                     "役職": t.get("role", "—"),
                     "階級": t.get("rank", "—"),
-                    "メール": t.get("email") or "—",
                     "アクティブ": t.get("is_active"),
                 })
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
@@ -701,11 +708,9 @@ def view_admin():
                 with col1:
                     new_t_name = st.text_input("講師名 *", placeholder="例: 田中太郎")
                     new_t_room = st.selectbox("所属教室 *", list(room_map.keys()))
-                    new_t_role = st.selectbox("役職", ["社員", "契約", "アルバイト", "教室長"])
                 with col2:
+                    new_t_role = st.selectbox("役職", ["社員", "契約", "アルバイト", "教室長"])
                     new_t_rank = st.selectbox("階級", ["新人", "中堅", "ベテラン", "教室長"])
-                    new_t_email = st.text_input("メール（週次配信用）", placeholder="例: tanaka@...")
-                    new_t_line = st.text_input("LINE user ID（通知用）")
                 if st.form_submit_button("登録", type="primary"):
                     if not new_t_name.strip():
                         st.warning("講師名は必須です")
@@ -714,15 +719,14 @@ def view_admin():
                             name=new_t_name.strip(),
                             classroom_id=room_map[new_t_room],
                             role=new_t_role, rank=new_t_rank,
-                            email=new_t_email.strip() or None,
-                            line_user_id=new_t_line.strip() or None,
+                            email=None, line_user_id=None,
                         )
                         if r.get("error"):
-                            st.error(f"登録失敗: {r['error']}")
+                            st.session_state["admin_flash"] = {"level": "error", "msg": f"講師登録失敗: {r['error']}"}
                         else:
-                            st.success(f"✅ 講師「{r['name']}」を登録しました")
-                            st.cache_data.clear()
-                            st.rerun()
+                            st.session_state["admin_flash"] = {"level": "success", "msg": f"✅ 講師「{r['name']}」を登録しました"}
+                        st.cache_data.clear()
+                        st.rerun()
 
         if teachers:
             st.markdown("#### 🚫 講師を非アクティブ化")
