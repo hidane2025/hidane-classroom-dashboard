@@ -1,4 +1,7 @@
-"""ダッシュボード用 軽量Supabaseクライアント
+"""ダッシュボード用 軽量Supabaseクライアント v2
+
+v2 changelog:
+- fetch_lesson_detail / fetch_events_for_lesson 追加（Phase 6 動画プレーヤー）
 
 pipeline/db_writer.py は YOLO/MediaPipe 等の重量ライブラリに連鎖する import を持つため、
 Streamlit Cloud 等の軽量デプロイ環境ではこちらを使う。
