@@ -150,6 +150,70 @@ def fetch_events_for_lesson(lesson_id: str) -> list[dict]:
         return []
 
 
+def create_classroom(*, name: str, region: str | None = None) -> dict:
+    """教室マスタ追加（UI用）"""
+    client = _get_client()
+    if client is None:
+        return {"error": "DB未接続"}
+    try:
+        existing = client.table("classrooms").select("id").eq("name", name).execute()
+        if existing.data:
+            return {"error": f"既に存在: {name}"}
+        result = client.table("classrooms").insert({
+            "name": name, "region": region,
+        }).execute()
+        return {"id": result.data[0]["id"], "name": name} if result.data else {"error": "insert failed"}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def create_teacher(*, name: str, classroom_id: str | None,
+                   role: str, rank: str,
+                   email: str | None = None,
+                   line_user_id: str | None = None) -> dict:
+    """講師マスタ追加（UI用）"""
+    client = _get_client()
+    if client is None:
+        return {"error": "DB未接続"}
+    try:
+        existing = client.table("teachers").select("id").eq("name", name).execute()
+        if existing.data:
+            return {"error": f"既に存在: {name}"}
+        result = client.table("teachers").insert({
+            "name": name,
+            "classroom_id": classroom_id,
+            "role": role,
+            "rank": rank,
+            "email": email,
+            "line_user_id": line_user_id,
+        }).execute()
+        return {"id": result.data[0]["id"], "name": name} if result.data else {"error": "insert failed"}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def deactivate_classroom(classroom_id: str) -> bool:
+    client = _get_client()
+    if client is None:
+        return False
+    try:
+        client.table("classrooms").update({"is_active": False}).eq("id", classroom_id).execute()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def deactivate_teacher(teacher_id: str) -> bool:
+    client = _get_client()
+    if client is None:
+        return False
+    try:
+        client.table("teachers").update({"is_active": False}).eq("id", teacher_id).execute()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def upload_lesson_video(*, file_bytes: bytes, teacher_id: str, classroom_id: str,
                         lesson_date: str, subject: str | None,
                         grade: str | None, student_count: int | None,

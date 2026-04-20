@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import os
-
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -34,6 +33,10 @@ from db_client import (
     fetch_events_for_lesson,
     fetch_pending_lessons,
     upload_lesson_video,
+    create_classroom,
+    create_teacher,
+    deactivate_classroom,
+    deactivate_teacher,
 )
 from ai_coach import ask_coach  # anthropicのみ依存
 from compare_lessons import compare  # anthropicのみ依存
@@ -622,29 +625,130 @@ def view_admin():
 
     tab1, tab2, tab3 = st.tabs(["教室マスタ", "講師マスタ", "授業履歴"])
 
+    # ====== 教室マスタ ======
     with tab1:
         st.subheader("🏫 教室一覧")
         rooms = fetch_all_classrooms()
         if rooms:
-            st.dataframe(pd.DataFrame(rooms), use_container_width=True, hide_index=True)
+            room_df = pd.DataFrame(rooms)[["name", "region", "is_active"]]
+            room_df.columns = ["教室名", "地域", "アクティブ"]
+            st.dataframe(room_df, use_container_width=True, hide_index=True)
         else:
-            st.info("教室が未登録です。`admin/register_classroom.py` から登録してください。")
+            st.info("教室が未登録です。下のフォームから追加してください。")
 
+        st.markdown("#### ➕ 教室を追加")
+        with st.form("add_classroom", clear_on_submit=True):
+            col1, col2 = st.columns(2)
+            with col1:
+                new_room_name = st.text_input("教室名 *", placeholder="例: 豊橋本校")
+            with col2:
+                new_room_region = st.text_input("地域", placeholder="例: 愛知県東部")
+            if st.form_submit_button("登録", type="primary"):
+                if not new_room_name.strip():
+                    st.warning("教室名は必須です")
+                else:
+                    r = create_classroom(name=new_room_name.strip(), region=new_room_region.strip() or None)
+                    if r.get("error"):
+                        st.error(f"登録失敗: {r['error']}")
+                    else:
+                        st.success(f"✅ 教室「{r['name']}」を登録しました")
+                        st.cache_data.clear()
+                        st.rerun()
+
+        if rooms:
+            st.markdown("#### 🚫 教室を非アクティブ化")
+            active_rooms = [r for r in rooms if r.get("is_active")]
+            if active_rooms:
+                target = st.selectbox(
+                    "対象の教室", active_rooms,
+                    format_func=lambda r: r["name"], key="deact_room",
+                )
+                if st.button("非アクティブ化", key="deact_room_btn"):
+                    if deactivate_classroom(target["id"]):
+                        st.success(f"「{target['name']}」を非アクティブ化")
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.error("非アクティブ化失敗")
+
+    # ====== 講師マスタ ======
     with tab2:
         st.subheader("👤 講師一覧")
         teachers = fetch_all_teachers()
         if teachers:
-            st.dataframe(pd.DataFrame(teachers), use_container_width=True, hide_index=True)
+            rows = []
+            for t in teachers:
+                rows.append({
+                    "講師名": t.get("name"),
+                    "教室": (t.get("classrooms") or {}).get("name", "—"),
+                    "役職": t.get("role", "—"),
+                    "階級": t.get("rank", "—"),
+                    "メール": t.get("email") or "—",
+                    "アクティブ": t.get("is_active"),
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         else:
-            st.info("講師が未登録です。`admin/register_teacher.py` から登録してください。")
+            st.info("講師が未登録です。下のフォームから追加してください。")
 
+        st.markdown("#### ➕ 講師を追加")
+        all_rooms = fetch_all_classrooms()
+        if not all_rooms:
+            st.warning("先に教室マスタを登録してください。")
+        else:
+            room_map = {r["name"]: r["id"] for r in all_rooms}
+            with st.form("add_teacher", clear_on_submit=True):
+                col1, col2 = st.columns(2)
+                with col1:
+                    new_t_name = st.text_input("講師名 *", placeholder="例: 田中太郎")
+                    new_t_room = st.selectbox("所属教室 *", list(room_map.keys()))
+                    new_t_role = st.selectbox("役職", ["社員", "契約", "アルバイト", "教室長"])
+                with col2:
+                    new_t_rank = st.selectbox("階級", ["新人", "中堅", "ベテラン", "教室長"])
+                    new_t_email = st.text_input("メール（週次配信用）", placeholder="例: tanaka@...")
+                    new_t_line = st.text_input("LINE user ID（通知用）")
+                if st.form_submit_button("登録", type="primary"):
+                    if not new_t_name.strip():
+                        st.warning("講師名は必須です")
+                    else:
+                        r = create_teacher(
+                            name=new_t_name.strip(),
+                            classroom_id=room_map[new_t_room],
+                            role=new_t_role, rank=new_t_rank,
+                            email=new_t_email.strip() or None,
+                            line_user_id=new_t_line.strip() or None,
+                        )
+                        if r.get("error"):
+                            st.error(f"登録失敗: {r['error']}")
+                        else:
+                            st.success(f"✅ 講師「{r['name']}」を登録しました")
+                            st.cache_data.clear()
+                            st.rerun()
+
+        if teachers:
+            st.markdown("#### 🚫 講師を非アクティブ化")
+            active_t = [t for t in teachers if t.get("is_active")]
+            if active_t:
+                target_t = st.selectbox(
+                    "対象の講師", active_t,
+                    format_func=lambda t: f"{t['name']}（{(t.get('classrooms') or {}).get('name', '—')}）",
+                    key="deact_t",
+                )
+                if st.button("非アクティブ化", key="deact_t_btn"):
+                    if deactivate_teacher(target_t["id"]):
+                        st.success(f"「{target_t['name']}」を非アクティブ化")
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.error("非アクティブ化失敗")
+
+    # ====== 授業履歴 ======
     with tab3:
         st.subheader("📚 直近の授業履歴")
         df = load_all_lessons()
         if df.empty:
             render_no_data_notice()
         else:
-            cols = ["lesson_date", "teacher_name", "classroom_name", "subject", "overall_score", "grade_letter"]
+            cols = ["lesson_date", "teacher_name", "classroom_name", "subject", "overall_score", "grade_letter", "status"]
             cols = [c for c in cols if c in df.columns]
             st.dataframe(df[cols].head(50), use_container_width=True, hide_index=True)
 
