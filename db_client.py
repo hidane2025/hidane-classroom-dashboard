@@ -243,8 +243,12 @@ def upload_lesson_video(*, file_bytes: bytes, teacher_id: str, classroom_id: str
         return {"error": "DB未接続"}
 
     from datetime import datetime
+    from uuid import uuid4
     ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    storage_key = f"inbox/{ts}_{original_filename}"
+    # Supabase Storage は非ASCII keyを拒否するため UUID baseに。
+    # 元のファイル名は lessons.video_filename に保存される。
+    ext = original_filename.rsplit(".", 1)[-1].lower() if "." in original_filename else "mp4"
+    storage_key = f"inbox/{ts}_{uuid4().hex[:8]}.{ext}"
 
     # 1. Storage にアップロード
     try:
