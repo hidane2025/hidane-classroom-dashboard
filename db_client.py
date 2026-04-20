@@ -27,19 +27,31 @@ def is_db_available() -> bool:
 
 
 def fetch_all_teachers() -> list[dict]:
+    """講師一覧（is_activeフィルタ + 教室名合成）。JOIN回避で安定化。"""
     client = _get_client()
     if client is None:
         return []
     try:
         result = (
             client.table("teachers")
-            .select("*, classrooms(name)")
+            .select("*")
             .eq("is_active", True)
             .order("name")
             .execute()
         )
-        return result.data or []
-    except Exception:  # noqa: BLE001
+        rows = result.data or []
+        # classroom 名を別クエリで取得し合成
+        if rows:
+            rooms_result = client.table("classrooms").select("id, name").execute()
+            room_map = {r["id"]: r["name"] for r in (rooms_result.data or [])}
+            for r in rows:
+                cid = r.get("classroom_id")
+                r["classrooms"] = {"name": room_map.get(cid, "—")} if cid else {"name": "—"}
+        return rows
+    except Exception as exc:  # noqa: BLE001
+        # デバッグのため stderr に出す
+        import sys
+        print(f"[fetch_all_teachers ERROR] {type(exc).__name__}: {exc}", file=sys.stderr)
         return []
 
 
