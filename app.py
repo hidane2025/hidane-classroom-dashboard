@@ -28,6 +28,8 @@ from db_client import (  # noqa: E402
     fetch_all_classrooms,
     fetch_all_teachers,
     fetch_teacher_history,
+    fetch_lesson_detail,
+    fetch_events_for_lesson,
 )
 from ai_coach import ask_coach  # noqa: E402 — anthropicのみ依存
 from compare_lessons import compare  # noqa: E402 — anthropicのみ依存
@@ -644,12 +646,184 @@ def view_admin():
 
 
 # ==========================================================
+# ビュー: 授業詳細（動画プレーヤー＋イベント連動）
+# ==========================================================
+KIND_ICONS_V = {
+    "phone_use": "📱", "sleeping": "😴", "head_down": "🙇",
+    "excessive_motion": "💥", "loud_noise": "🔊", "long_silence": "🤫",
+    "eating": "🍫", "other_item": "❓",
+}
+KIND_LABELS_V = {
+    "phone_use": "スマホ使用", "sleeping": "居眠り", "head_down": "うつむき継続",
+    "excessive_motion": "ふざけ合い/立ち歩き", "loud_noise": "私語・騒ぎ",
+    "long_silence": "長い沈黙", "eating": "飲食", "other_item": "その他",
+}
+SEV_COLORS_V = {"low": "#64748b", "medium": "#F28C28", "high": "#C41E24"}
+
+
+def view_lesson_detail():
+    render_brand_header("授業詳細 — 動画プレーヤー＋AI判定")
+
+    if not _db_available():
+        render_no_db_notice()
+        return
+
+    df = load_all_lessons()
+    if df.empty:
+        render_no_data_notice()
+        return
+
+    # 授業選択肢
+    df = df.sort_values("lesson_date", ascending=False)
+    labels = {}
+    for _, row in df.iterrows():
+        date_str = row["lesson_date"].strftime("%Y-%m-%d")
+        label = (
+            f"{date_str} / {row.get('classroom_name', '—')} / "
+            f"{row.get('teacher_name', '—')} / "
+            f"{row.get('subject') or '科目未設定'} / "
+            f"{row.get('overall_score', '—')}点"
+        )
+        labels[label] = row["id"]
+
+    selected = st.sidebar.selectbox("授業を選択", list(labels.keys()))
+    if not selected:
+        return
+    lesson_id = labels[selected]
+
+    lesson = fetch_lesson_detail(lesson_id)
+    if not lesson:
+        st.error("授業データが取得できませんでした")
+        return
+
+    # session state でシーク制御
+    if "seek_sec" not in st.session_state:
+        st.session_state.seek_sec = 0
+
+    # ヘッダーメタ
+    cols = st.columns(4)
+    with cols[0]:
+        kpi_card("総合スコア",
+                 f"{lesson.get('overall_score', '—')}点" if lesson.get('overall_score') is not None else "—",
+                 f"グレード {lesson.get('grade_letter') or '—'}",
+                 BRAND_PRIMARY)
+    with cols[1]:
+        kpi_card("講師",
+                 (lesson.get("teachers") or {}).get("name", "—"),
+                 lesson.get("subject") or "—",
+                 BRAND_ACCENT)
+    with cols[2]:
+        kpi_card("教室",
+                 (lesson.get("classrooms") or {}).get("name", "—"),
+                 f"{lesson.get('grade') or '—'} / {lesson.get('student_count') or '—'}名",
+                 BRAND_SECONDARY)
+    with cols[3]:
+        dur = lesson.get("video_duration_sec") or 0
+        kpi_card("動画尺", f"{dur//60}分{dur%60}秒", lesson.get("lesson_date", "")[:10], "#64748b")
+
+    st.markdown("---")
+
+    video_url = lesson.get("video_url")
+    events = fetch_events_for_lesson(lesson_id)
+
+    col_v, col_e = st.columns([3, 2])
+
+    with col_v:
+        st.subheader("🎥 授業動画")
+        if video_url:
+            # start_time 指定で該当イベント位置から再生
+            st.video(video_url, start_time=int(st.session_state.seek_sec))
+            st.caption(
+                f"現在の再生開始位置: {int(st.session_state.seek_sec)//60}:"
+                f"{int(st.session_state.seek_sec)%60:02d}"
+            )
+        else:
+            st.info(
+                "📹 動画は未アップロードです。"
+                "`python scripts/upload_lesson_media.py` で Supabase Storage にアップロード後、"
+                "ここに表示されます。"
+            )
+
+    with col_e:
+        st.subheader("🚨 AI検知イベント")
+        if not events:
+            st.success("✅ 問題行動の検知は0件（Vision判定で全て除外）")
+        else:
+            for ev in events:
+                mmss = f"{int(ev['start_sec']) // 60:02d}:{int(ev['start_sec']) % 60:02d}"
+                icon = KIND_ICONS_V.get(ev.get("kind"), "•")
+                label = KIND_LABELS_V.get(ev.get("kind"), ev.get("kind", "—"))
+                color = SEV_COLORS_V.get(ev.get("severity"), "#64748b")
+                with st.container():
+                    c1, c2, c3 = st.columns([1, 3, 1])
+                    with c1:
+                        st.markdown(f"**{mmss}**")
+                    with c2:
+                        st.markdown(f"{icon} **{label}**")
+                        if ev.get("vision_explanation"):
+                            st.caption(ev["vision_explanation"][:100])
+                        elif ev.get("description"):
+                            st.caption(ev["description"][:100])
+                    with c3:
+                        if st.button("▶ 再生", key=f"seek_{ev['id']}"):
+                            st.session_state.seek_sec = int(ev["start_sec"])
+                            st.rerun()
+                    st.markdown(
+                        f"<div style='height:2px;background:{color};margin-bottom:12px;'></div>",
+                        unsafe_allow_html=True,
+                    )
+
+    # AI講評
+    st.markdown("---")
+    st.subheader("🤖 AI講評")
+    if lesson.get("ai_commentary"):
+        st.info(lesson["ai_commentary"])
+
+    col_good, col_imp = st.columns(2)
+    with col_good:
+        st.markdown("### ✅ 良かった点")
+        for p in lesson.get("good_points") or []:
+            st.markdown(f"- {p}")
+    with col_imp:
+        st.markdown("### 📈 改善ポイント")
+        for p in lesson.get("improvements") or []:
+            st.markdown(f"- {p}")
+
+    # 12項目チェックシート
+    cs_df = load_checklist_scores([lesson_id])
+    if not cs_df.empty:
+        st.markdown("---")
+        st.subheader("🎯 12項目チェックシート")
+        cs_df = cs_df.sort_values("item_id")
+        fig = go.Figure()
+        fig.add_trace(go.Scatterpolar(
+            r=cs_df["score"], theta=cs_df["item_title"],
+            fill="toself", line_color=BRAND_PRIMARY,
+        ))
+        fig.update_layout(
+            polar=dict(radialaxis=dict(visible=True, range=[0, 5])),
+            height=450,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        with st.expander("各項目の詳細コメント"):
+            for _, r in cs_df.iterrows():
+                st.markdown(
+                    f"**{r['item_id']}. {r['item_title']}**: "
+                    f"{'★' * int(r['score'])}{'☆' * (5 - int(r['score']))} — {r.get('ai_comment', '')}"
+                )
+                if r.get("evidence"):
+                    st.caption(f"根拠: {r['evidence']}")
+
+
+# ==========================================================
 # メイン
 # ==========================================================
 VIEWS = {
     "🏢 社長ビュー": view_ceo,
     "👥 教室長ビュー": view_manager,
     "👤 講師ビュー": view_teacher,
+    "🎥 授業詳細": view_lesson_detail,
     "⚙️ 管理": view_admin,
 }
 

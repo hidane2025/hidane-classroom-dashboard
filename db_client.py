@@ -113,6 +113,43 @@ def fetch_checklist_scores(lesson_ids: list[str]) -> list[dict]:
         return []
 
 
+def fetch_lesson_detail(lesson_id: str) -> dict | None:
+    """特定授業の詳細（動画URL込み）を取得"""
+    client = _get_client()
+    if client is None:
+        return None
+    try:
+        result = (
+            client.table("lessons")
+            .select("*, teachers(name), classrooms(name)")
+            .eq("id", lesson_id)
+            .limit(1)
+            .execute()
+        )
+        rows = result.data or []
+        return rows[0] if rows else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def fetch_events_for_lesson(lesson_id: str) -> list[dict]:
+    """授業の検知イベント一覧（タイムスタンプ・severity・Visionコメント）"""
+    client = _get_client()
+    if client is None:
+        return []
+    try:
+        result = (
+            client.table("events")
+            .select("*")
+            .eq("lesson_id", lesson_id)
+            .order("start_sec")
+            .execute()
+        )
+        return result.data or []
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def fetch_alerts(active_only: bool = True) -> list[dict]:
     client = _get_client()
     if client is None:
