@@ -68,7 +68,9 @@ def fetch_all_classrooms() -> list[dict]:
             .execute()
         )
         return result.data or []
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        import sys
+        print(f"[fetch_all_classrooms ERROR] {type(exc).__name__}: {exc}", file=sys.stderr)
         return []
 
 
