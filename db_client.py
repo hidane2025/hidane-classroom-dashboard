@@ -1,7 +1,4 @@
-"""ダッシュボード用 軽量Supabaseクライアント v2
-
-v2 changelog:
-- fetch_lesson_detail / fetch_events_for_lesson 追加（Phase 6 動画プレーヤー）
+"""ダッシュボード用 軽量Supabaseクライアント
 
 pipeline/db_writer.py は YOLO/MediaPipe 等の重量ライブラリに連鎖する import を持つため、
 Streamlit Cloud 等の軽量デプロイ環境ではこちらを使う。
@@ -146,6 +143,84 @@ def fetch_events_for_lesson(lesson_id: str) -> list[dict]:
             .select("*")
             .eq("lesson_id", lesson_id)
             .order("start_sec")
+            .execute()
+        )
+        return result.data or []
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def upload_lesson_video(*, file_bytes: bytes, teacher_id: str, classroom_id: str,
+                        lesson_date: str, subject: str | None,
+                        grade: str | None, student_count: int | None,
+                        notes: str | None, original_filename: str) -> dict:
+    """Phase 6+: クライアントからの動画アップロード
+
+    1. Supabase Storage inbox/{timestamp}.mp4 に保存
+    2. lessons テーブルに status='pending' で挿入
+    3. dict で結果を返す（lesson_id, storage_url, error）
+    """
+    client = _get_client()
+    if client is None:
+        return {"error": "DB未接続"}
+
+    from datetime import datetime
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    storage_key = f"inbox/{ts}_{original_filename}"
+
+    # 1. Storage にアップロード
+    try:
+        try:
+            client.storage.from_("lesson-videos").remove([storage_key])
+        except Exception:  # noqa: BLE001
+            pass
+        client.storage.from_("lesson-videos").upload(
+            path=storage_key,
+            file=file_bytes,
+            file_options={"content-type": "video/mp4"},
+        )
+        storage_url = client.storage.from_("lesson-videos").get_public_url(storage_key)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"Storage upload 失敗: {type(exc).__name__}: {exc}"}
+
+    # 2. lessons にレコード挿入（analyzer が後で拾う）
+    try:
+        payload = {
+            "teacher_id": teacher_id,
+            "classroom_id": classroom_id,
+            "lesson_date": lesson_date,
+            "subject": subject,
+            "grade": grade,
+            "student_count": student_count,
+            "video_filename": original_filename,
+            "video_url": storage_url,
+            "status": "pending",
+            "notes": notes,
+        }
+        result = client.table("lessons").insert(payload).execute()
+        if not result.data:
+            return {"error": "lessons insert empty result", "storage_url": storage_url}
+        return {
+            "lesson_id": result.data[0]["id"],
+            "storage_url": storage_url,
+            "status": "pending",
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"DB insert 失敗: {type(exc).__name__}: {exc}",
+                "storage_url": storage_url}
+
+
+def fetch_pending_lessons() -> list[dict]:
+    """ヒダネ側 watcher 用: status='pending' の授業一覧"""
+    client = _get_client()
+    if client is None:
+        return []
+    try:
+        result = (
+            client.table("lessons")
+            .select("*, teachers(name), classrooms(name)")
+            .eq("status", "pending")
+            .order("created_at")
             .execute()
         )
         return result.data or []

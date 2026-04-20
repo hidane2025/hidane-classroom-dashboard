@@ -1,7 +1,8 @@
-"""HIDANE Classroom Intelligence — 3層ダッシュボード (v2: 動画プレーヤー統合)
+"""HIDANE Classroom Intelligence — 3層ダッシュボード
 
 使い方:
-    streamlit run app.py
+    source ../.venv/bin/activate
+    streamlit run dashboard/app.py
 
 ビュー:
     - 社長ビュー（全17教室俯瞰）
@@ -11,6 +12,7 @@
 from __future__ import annotations
 
 import os
+
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -22,16 +24,19 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
-# フラット構造（Streamlit Cloud public repo）なので同階層から import
-from db_client import (  # noqa: E402
+# ダッシュボード側は重量ライブラリ（YOLO/mediapipe等）を読み込まないように
+# dashboard.db_client のみから DB ヘルパーを取得する（Streamlit Cloud 対応）
+from db_client import (
     fetch_all_classrooms,
     fetch_all_teachers,
     fetch_teacher_history,
     fetch_lesson_detail,
     fetch_events_for_lesson,
+    fetch_pending_lessons,
+    upload_lesson_video,
 )
-from ai_coach import ask_coach  # noqa: E402 — anthropicのみ依存
-from compare_lessons import compare  # noqa: E402 — anthropicのみ依存
+from ai_coach import ask_coach  # anthropicのみ依存
+from compare_lessons import compare  # anthropicのみ依存
 
 load_dotenv(PROJECT_ROOT / ".env", override=True)
 
@@ -816,6 +821,103 @@ def view_lesson_detail():
 
 
 # ==========================================================
+# ビュー: 動画投入（クライアントセルフサービス）
+# ==========================================================
+def view_upload():
+    render_brand_header("📤 動画投入 — 授業録画のアップロード")
+
+    if not _db_available():
+        render_no_db_notice()
+        return
+
+    st.info(
+        "授業録画（mkv / mp4 ・ 500MB以下）をアップロードすると、"
+        "ヒダネ側の解析ワーカーが自動で拾って AI 採点します（通常5〜15分）。"
+    )
+
+    classrooms = fetch_all_classrooms()
+    teachers = fetch_all_teachers()
+    if not classrooms or not teachers:
+        st.warning("教室または講師マスタが未登録です。先に「⚙️ 管理」タブで確認してください。")
+        return
+
+    room_map = {c["name"]: c["id"] for c in classrooms}
+    teacher_map = {t["name"]: t["id"] for t in teachers}
+
+    with st.form("upload_form", clear_on_submit=False):
+        col1, col2 = st.columns(2)
+        with col1:
+            classroom_name = st.selectbox("教室", list(room_map.keys()))
+            teacher_name = st.selectbox("講師", list(teacher_map.keys()))
+            lesson_date = st.date_input("授業日", value=date.today())
+        with col2:
+            subject = st.text_input("科目", placeholder="例: 数学A / 英語")
+            grade = st.text_input("学年", placeholder="例: 中1 / 中3")
+            student_count = st.number_input("出席生徒数", min_value=0, max_value=50, value=20)
+        notes = st.text_area("メモ（教室長のコメント等）", placeholder="任意")
+
+        uploaded_file = st.file_uploader(
+            "授業動画（mkv / mp4 ・最大500MB）",
+            type=["mkv", "mp4", "mov", "avi"],
+            accept_multiple_files=False,
+        )
+
+        submitted = st.form_submit_button("🚀 解析キューに投入", type="primary")
+
+    if submitted:
+        if not uploaded_file:
+            st.warning("動画ファイルを選択してください")
+            return
+        size_mb = uploaded_file.size / (1024 * 1024)
+        if size_mb > 500:
+            st.error(f"ファイルが大きすぎます（{size_mb:.1f}MB > 500MB）。圧縮してから再試行してください。")
+            return
+
+        with st.spinner(f"Supabase Storage にアップロード中（{size_mb:.1f}MB）…"):
+            result = upload_lesson_video(
+                file_bytes=uploaded_file.getvalue(),
+                teacher_id=teacher_map[teacher_name],
+                classroom_id=room_map[classroom_name],
+                lesson_date=lesson_date.isoformat(),
+                subject=subject or None,
+                grade=grade or None,
+                student_count=int(student_count) if student_count else None,
+                notes=notes or None,
+                original_filename=uploaded_file.name,
+            )
+
+        if result.get("error"):
+            st.error(f"アップロード失敗: {result['error']}")
+        else:
+            st.success(
+                f"✅ アップロード完了！lesson_id: `{result['lesson_id']}`\n\n"
+                f"ステータス: **解析待ち (pending)**\n\n"
+                "ヒダネ解析ワーカーが数分以内に拾って採点を開始します。"
+                "完了後「🎥 授業詳細」ビューでスコアとレポートが表示されます。"
+            )
+            st.video(result["storage_url"], start_time=0)
+
+    # 解析待ち一覧
+    st.markdown("---")
+    st.subheader("⏳ 解析待ち授業一覧")
+    pending = fetch_pending_lessons()
+    if not pending:
+        st.caption("解析待ちの授業はありません。")
+    else:
+        rows = []
+        for p in pending:
+            rows.append({
+                "投入日時": p.get("created_at", "—")[:19].replace("T", " "),
+                "講師": (p.get("teachers") or {}).get("name", "—"),
+                "教室": (p.get("classrooms") or {}).get("name", "—"),
+                "授業日": p.get("lesson_date", "—"),
+                "ファイル": p.get("video_filename", "—"),
+                "ステータス": p.get("status", "—"),
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+# ==========================================================
 # メイン
 # ==========================================================
 VIEWS = {
@@ -823,6 +925,7 @@ VIEWS = {
     "👥 教室長ビュー": view_manager,
     "👤 講師ビュー": view_teacher,
     "🎥 授業詳細": view_lesson_detail,
+    "📤 動画投入": view_upload,
     "⚙️ 管理": view_admin,
 }
 
