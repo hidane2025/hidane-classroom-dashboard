@@ -41,7 +41,7 @@ from db_client import (
 from ai_coach import ask_coach  # anthropicのみ依存
 from compare_lessons import compare  # anthropicのみ依存
 
-load_dotenv(PROJECT_ROOT / ".env", override=True)
+load_dotenv(override=True)  # ローカル開発時のみ作用。Streamlit Cloud では下の st.secrets ブリッジが使われる
 
 # Streamlit Cloud用: st.secrets の値を環境変数に橋渡し（ローカル開発は .env が優先）
 try:
