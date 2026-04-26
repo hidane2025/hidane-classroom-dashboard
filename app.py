@@ -21,7 +21,6 @@ import plotly.graph_objects as go
 import streamlit as st
 from dotenv import load_dotenv
 
-PROJECT_ROOT = Path(__file__).resolve().parent
 
 # ダッシュボード側は重量ライブラリ（YOLO/mediapipe等）を読み込まないように
 # dashboard.db_client のみから DB ヘルパーを取得する（Streamlit Cloud 対応）
@@ -31,6 +30,7 @@ from db_client import (
     fetch_teacher_history,
     fetch_lesson_detail,
     fetch_events_for_lesson,
+    fetch_check_item_events,
     fetch_pending_lessons,
     upload_lesson_video,
     create_classroom,
@@ -70,6 +70,27 @@ BRAND_PRIMARY = "#C41E24"
 BRAND_SECONDARY = "#F28C28"
 BRAND_ACCENT = "#1a5276"
 BRAND_DARK = "#0f1629"
+
+# AI が自信を持って判定する 5 項目の item_id（パイプライン側仕様）
+SCORED_ITEM_IDS = (1, 2, 5, 10, 11)
+
+
+def filter_scored_items(cs_df: pd.DataFrame) -> pd.DataFrame:
+    """checklist_scores DataFrame から scored 行だけを抽出。
+
+    新カラム status が存在すればそれで分離、未適用なら item_id ホワイトリストでフォールバック。
+    後方互換のため、空入力は空 DF を返す。
+    """
+    if cs_df is None or cs_df.empty:
+        return cs_df if cs_df is not None else pd.DataFrame()
+    if "status" in cs_df.columns:
+        mask = cs_df["status"].fillna("scored") == "scored"
+        result = cs_df[mask]
+        if not result.empty:
+            return result
+    if "item_id" in cs_df.columns:
+        return cs_df[cs_df["item_id"].isin(SCORED_ITEM_IDS)]
+    return cs_df
 
 
 # ==========================================================
@@ -407,17 +428,22 @@ def view_manager():
             if latest.get("ai_commentary"):
                 st.info(latest["ai_commentary"])
 
-        # 12項目レーダー
+        # 12項目レーダー（AIが自信を持って判定する scored 5項目のみ）
         recent_lesson_ids = teacher_df["id"].tolist()[-5:]
         cs_df = load_checklist_scores(recent_lesson_ids)
-        if not cs_df.empty:
+        scored_df = filter_scored_items(cs_df)
+        if not scored_df.empty:
             avg_by_item = (
-                cs_df.groupby(["item_id", "item_title"])["score"]
+                scored_df.groupby(["item_id", "item_title"])["score"]
                 .mean()
                 .reset_index()
                 .sort_values("item_id")
             )
-            st.subheader("🎯 12項目レーダー（直近5授業平均）")
+            st.subheader("🎯 AI判定5項目レーダー（直近5授業平均）")
+            st.caption(
+                "※ AIが自信を持って判定できる 5 項目のみで描画しています。"
+                "残り7項目は授業詳細ビューで教室長が個別評価してください。"
+            )
             fig = go.Figure()
             fig.add_trace(go.Scatterpolar(
                 r=avg_by_item["score"],
@@ -551,13 +577,18 @@ def view_teacher():
         for pt in (imp if isinstance(imp, list) else []):
             st.markdown(f"- {pt}")
 
-    # 12項目レーダー
+    # 12項目レーダー（AIが自信を持って判定する scored 5項目のみ）
     cs_df = load_checklist_scores(hist_df["id"].tolist()[-5:])
-    if not cs_df.empty:
+    scored_df = filter_scored_items(cs_df)
+    if not scored_df.empty:
         st.markdown("---")
-        st.subheader("🎯 12項目（直近5授業平均）")
+        st.subheader("🎯 AI判定5項目（直近5授業平均）")
+        st.caption(
+            "※ AIが自信を持って判定できる 5 項目のみ表示。"
+            "残り7項目は教室長が動画を観て個別評価する設計です。"
+        )
         avg = (
-            cs_df.groupby(["item_id", "item_title"])["score"]
+            scored_df.groupby(["item_id", "item_title"])["score"]
             .mean()
             .reset_index()
             .sort_values("item_id")
@@ -590,13 +621,17 @@ def view_teacher():
         else:
             with st.spinner("AIコーチが考えています…"):
                 checklist_avg_map: dict[int, dict] = {}
-                if not cs_df.empty:
+                # scored のみで集計（信頼度の低い項目をコーチに渡さない）
+                coach_src = filter_scored_items(cs_df)
+                if not coach_src.empty:
                     agg = (
-                        cs_df.groupby(["item_id", "item_title"])["score"]
+                        coach_src.groupby(["item_id", "item_title"])["score"]
                         .mean()
                         .reset_index()
                     )
                     for _, row in agg.iterrows():
+                        if row["score"] is None or pd.isna(row["score"]):
+                            continue
                         checklist_avg_map[int(row["item_id"])] = {
                             "title": row["item_title"],
                             "avg_score": float(row["score"]),
@@ -901,31 +936,335 @@ def view_lesson_detail():
         for p in lesson.get("improvements") or []:
             st.markdown(f"- {p}")
 
-    # 12項目チェックシート
+    # 教科・単元バッジ（AI推定）と問いかけ量サマリ
+    render_subject_badge(lesson)
+    render_question_summary(lesson)
+
+    # 12項目チェックシート（scored / skipped 分離）
     cs_df = load_checklist_scores([lesson_id])
     if not cs_df.empty:
-        st.markdown("---")
-        st.subheader("🎯 12項目チェックシート")
-        cs_df = cs_df.sort_values("item_id")
+        render_checklist_two_blocks(cs_df, lesson_id)
+
+    # 12項目 × 秒数タイムライン（良例/悪例マーカー）
+    render_timeline_view(lesson_id, lesson)
+
+
+# ----------------------------------------------------------
+# 授業詳細用ヘルパー: 教科バッジ / 問いかけ量 / scored・skipped 分離
+# ----------------------------------------------------------
+def render_subject_badge(lesson: dict) -> None:
+    """AI が推定した教科・単元を表示。subject_confidence に応じて表現を変える。
+
+    schema migration 適用前は subject_ai が None なので
+    「（教科判定なし）」と graceful degrade させる。
+    """
+    st.markdown("---")
+    st.subheader("📚 教科・単元（AIが推定）")
+
+    subject_ai = lesson.get("subject_ai")
+    subject_topic = lesson.get("subject_topic")
+    subject_conf = lesson.get("subject_confidence")
+
+    if subject_ai is None and subject_topic is None:
+        st.caption("（教科判定なし — このレッスンには教科推定データがありません）")
+        return
+
+    try:
+        conf_value = float(subject_conf) if subject_conf is not None else 0.0
+    except (TypeError, ValueError):
+        conf_value = 0.0
+
+    if conf_value < 0.6:
+        st.warning("判定不可（信頼度が基準値 60% に達しませんでした）")
+        if subject_ai or subject_topic:
+            st.caption(f"参考: {subject_ai or '—'} / {subject_topic or '—'}")
+        return
+
+    parts = [p for p in [subject_ai, subject_topic] if p]
+    label = "・".join(parts) if parts else "—"
+    st.markdown(
+        f"<div style='background:{BRAND_DARK};color:white;padding:14px 20px;"
+        f"border-radius:8px;border-left:6px solid {BRAND_SECONDARY};'>"
+        f"<div style='font-size:20px;font-weight:700;'>{label}</div>"
+        f"<div style='font-size:12px;opacity:0.8;margin-top:4px;'>"
+        f"信頼度 {int(conf_value * 100)}%</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_question_summary(lesson: dict) -> None:
+    """問いかけ量（合計 / open / closed）の3カードを描画。
+
+    新カラム未存在時はセクションごと出さない（None なら抜ける）。
+    """
+    q_total = lesson.get("question_total")
+    q_open = lesson.get("question_open")
+    q_closed = lesson.get("question_closed")
+
+    if q_total is None and q_open is None and q_closed is None:
+        return
+
+    st.markdown("---")
+    st.subheader("🎤 問いかけ量")
+
+    cols = st.columns(3)
+    with cols[0]:
+        kpi_card("合計", f"{q_total if q_total is not None else '—'}回",
+                 "授業全体の問いかけ", BRAND_PRIMARY)
+    with cols[1]:
+        kpi_card("オープン", f"{q_open if q_open is not None else '—'}回",
+                 "思考を促す問いかけ", BRAND_SECONDARY)
+    with cols[2]:
+        kpi_card("クローズ", f"{q_closed if q_closed is not None else '—'}回",
+                 "Yes/Noや一問一答", BRAND_ACCENT)
+
+
+def render_checklist_two_blocks(cs_df: pd.DataFrame, lesson_id: str) -> None:
+    """12項目を scored / skipped に分離して2ブロック表示。
+
+    - scored: AI判定済み（信頼度バー + スコア）
+    - skipped: 教室長の目視確認推奨（手書き入力欄）
+    """
+    st.markdown("---")
+    st.subheader("🎯 12項目チェックシート")
+
+    # status カラムが無い旧データは "scored" 扱い（後方互換）
+    cs_df = cs_df.copy().sort_values("item_id")
+    if "status" not in cs_df.columns:
+        cs_df["status"] = "scored"
+    else:
+        cs_df["status"] = cs_df["status"].fillna("scored")
+
+    scored = cs_df[cs_df["status"] == "scored"]
+    skipped = cs_df[cs_df["status"] == "skipped"]
+
+    # ====== ブロック1: scored ======
+    st.markdown(f"#### ✅ AIが自信を持って判定した項目（{len(scored)}項目）")
+    if scored.empty:
+        st.info("AIが信頼度を持って採点できた項目はありませんでした。下の手動評価欄をご利用ください。")
+    else:
+        # レーダーチャート（scored のみ）
         fig = go.Figure()
         fig.add_trace(go.Scatterpolar(
-            r=cs_df["score"], theta=cs_df["item_title"],
-            fill="toself", line_color=BRAND_PRIMARY,
+            r=scored["score"].fillna(0),
+            theta=scored["item_title"],
+            fill="toself",
+            line_color=BRAND_PRIMARY,
+            name="AI判定",
         ))
         fig.update_layout(
             polar=dict(radialaxis=dict(visible=True, range=[0, 5])),
-            height=450,
+            height=380,
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        with st.expander("各項目の詳細コメント"):
-            for _, r in cs_df.iterrows():
-                st.markdown(
-                    f"**{r['item_id']}. {r['item_title']}**: "
-                    f"{'★' * int(r['score'])}{'☆' * (5 - int(r['score']))} — {r.get('ai_comment', '')}"
-                )
+        # 個別カード（信頼度バー付き）
+        for _, r in scored.iterrows():
+            score_val = r.get("score")
+            try:
+                conf = float(r.get("confidence")) if r.get("confidence") is not None else 0.0
+            except (TypeError, ValueError):
+                conf = 0.0
+            score_text = f"{int(score_val)}/5" if score_val is not None else "—"
+
+            c1, c2 = st.columns([3, 2])
+            with c1:
+                st.markdown(f"**{int(r['item_id'])}. {r['item_title']}** &nbsp; {score_text}")
+                if r.get("ai_comment"):
+                    st.caption(r["ai_comment"])
                 if r.get("evidence"):
                     st.caption(f"根拠: {r['evidence']}")
+            with c2:
+                # 信頼度バー
+                bar_value = max(0.0, min(1.0, conf))
+                st.progress(bar_value)
+                st.caption(f"信頼度 {int(bar_value * 100)}%")
+            st.markdown(
+                f"<div style='height:1px;background:#E5E7EB;margin:8px 0 12px 0;'></div>",
+                unsafe_allow_html=True,
+            )
+
+    # ====== ブロック2: skipped ======
+    st.markdown("---")
+    st.markdown(f"#### 👁 教室長の目視確認推奨（{len(skipped)}項目）")
+    st.caption(
+        "※ AIで判定するには情報量が足りない項目です。"
+        "教室長が動画を観て直接ご評価ください。"
+    )
+
+    if skipped.empty:
+        st.success("目視確認が必要な項目はありません（全項目をAIが判定できました）。")
+        return
+
+    for _, r in skipped.iterrows():
+        item_id = int(r["item_id"])
+        title = r["item_title"]
+        skip_reason = r.get("skip_reason") or "情報量不足"
+
+        st.markdown(f"**{item_id}. {title}**")
+        st.caption(f"スキップ理由: {skip_reason}")
+
+        c1, c2 = st.columns([1, 3])
+        with c1:
+            st.number_input(
+                f"あなたの評価（1-5）",
+                min_value=1, max_value=5, step=1, value=3,
+                key=f"manual_score_{lesson_id}_{item_id}",
+            )
+        with c2:
+            st.text_area(
+                "コメント（任意）",
+                key=f"manual_note_{lesson_id}_{item_id}",
+                height=80,
+                placeholder="どんな様子だったか、記憶に残った場面など",
+            )
+        st.markdown(
+            f"<div style='height:1px;background:#E5E7EB;margin:8px 0 16px 0;'></div>",
+            unsafe_allow_html=True,
+        )
+
+
+def render_timeline_view(lesson_id: str, lesson: dict) -> None:
+    """12項目×時間軸のタイムライン表示。
+
+    check_item_events テーブル（schema_v3_timeline.sql）からマーカーを取得し、
+    Plotly scatter で横=秒数、縦=項目ID の散布図を描画。
+    下部に「▶再生」ボタン付きリストを置き、クリックで動画をシーク。
+    """
+    try:
+        raw_events = fetch_check_item_events(lesson_id)
+    except Exception:  # noqa: BLE001
+        raw_events = []
+
+    st.markdown("---")
+    st.subheader("🕒 12項目タイムライン — スコアの根拠を秒数で")
+
+    if not raw_events:
+        st.info(
+            "⏳ この授業にはまだタイムラインデータがありません。\n\n"
+            "新しい解析（Ver.3以降）から自動で生成されます。"
+            "既存授業に反映したい場合は、ステータスを `pending` に戻して再解析してください。"
+        )
+        return
+
+    # 12項目のタイトル辞書を構築（チェックシートスコアから）
+    cs_df_local = load_checklist_scores([lesson_id])
+    title_map: dict[int, str] = {}
+    if not cs_df_local.empty:
+        for _, r in cs_df_local.iterrows():
+            title_map[int(r["item_id"])] = str(r["item_title"])
+    for ev in raw_events:
+        cid = int(ev.get("check_item_id", 0))
+        if cid and cid not in title_map:
+            title_map[cid] = str(ev.get("check_item_title") or f"項目{cid}")
+
+    # Plotly 散布図（横：秒、縦：項目ID逆順）
+    goods = [ev for ev in raw_events if ev.get("polarity") == "good"]
+    bads = [ev for ev in raw_events if ev.get("polarity") == "bad"]
+    duration_sec = max(float(lesson.get("video_duration_sec") or 0), 60.0)
+
+    def _mmss(sec: float) -> str:
+        s = int(sec)
+        return f"{s // 60:02d}:{s % 60:02d}"
+
+    fig = go.Figure()
+    if goods:
+        fig.add_trace(go.Scatter(
+            x=[float(ev["start_sec"]) for ev in goods],
+            y=[int(ev["check_item_id"]) for ev in goods],
+            mode="markers",
+            name="模範瞬間",
+            marker=dict(size=14, color="#16A34A", symbol="circle",
+                        line=dict(color="white", width=2)),
+            hovertext=[
+                f"<b>{title_map.get(int(ev['check_item_id']), '')}</b><br>"
+                f"{_mmss(float(ev['start_sec']))} / {ev.get('excerpt', '')[:40]}<br>"
+                f"<i>{ev.get('reason', '')[:80]}</i>"
+                for ev in goods
+            ],
+            hoverinfo="text",
+        ))
+    if bads:
+        fig.add_trace(go.Scatter(
+            x=[float(ev["start_sec"]) for ev in bads],
+            y=[int(ev["check_item_id"]) for ev in bads],
+            mode="markers",
+            name="改善瞬間",
+            marker=dict(size=14, color="#C41E24", symbol="x",
+                        line=dict(color="white", width=2)),
+            hovertext=[
+                f"<b>{title_map.get(int(ev['check_item_id']), '')}</b><br>"
+                f"{_mmss(float(ev['start_sec']))} / {ev.get('excerpt', '')[:40]}<br>"
+                f"<i>{ev.get('reason', '')[:80]}</i>"
+                for ev in bads
+            ],
+            hoverinfo="text",
+        ))
+
+    y_ids = sorted(title_map.keys(), reverse=True)
+    y_labels = [f"{i}. {title_map[i][:10]}" for i in y_ids]
+    fig.update_layout(
+        height=420,
+        margin=dict(l=8, r=8, t=24, b=32),
+        xaxis=dict(
+            title="経過時間",
+            range=[-5, duration_sec + 5],
+            tickmode="array",
+            tickvals=[i * 60 for i in range(0, int(duration_sec // 60) + 2)],
+            ticktext=[f"{i:02d}:00" for i in range(0, int(duration_sec // 60) + 2)],
+            gridcolor="#E5E7EB",
+        ),
+        yaxis=dict(
+            title="評価項目",
+            tickmode="array",
+            tickvals=y_ids,
+            ticktext=y_labels,
+            range=[0.5, 12.5],
+            gridcolor="#F1F5F9",
+        ),
+        plot_bgcolor="#FAF7F2",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # 詳細リスト（▶再生ボタン付き）
+    st.markdown("#### 📍 マーカー詳細 — クリックで動画をシーク")
+    # 秒数順に並べ、▶ボタンで seek_sec を更新
+    sorted_events = sorted(raw_events, key=lambda e: float(e.get("start_sec", 0)))
+    for ev in sorted_events:
+        polarity = ev.get("polarity", "")
+        is_good = polarity == "good"
+        badge_color = "#16A34A" if is_good else "#C41E24"
+        badge_text = "✅ 模範" if is_good else "⚠ 改善"
+        cid = int(ev.get("check_item_id", 0))
+        item_title = title_map.get(cid, ev.get("check_item_title", ""))
+        start = float(ev.get("start_sec", 0))
+
+        c1, c2, c3 = st.columns([1, 5, 1])
+        with c1:
+            st.markdown(
+                f"<div style='background:{badge_color};color:white;"
+                f"padding:4px 8px;border-radius:4px;text-align:center;"
+                f"font-weight:600;font-size:12px;'>{badge_text}</div>"
+                f"<div style='text-align:center;margin-top:4px;"
+                f"font-family:monospace;font-size:13px;'>{_mmss(start)}</div>",
+                unsafe_allow_html=True,
+            )
+        with c2:
+            st.markdown(f"**{cid}. {item_title}**")
+            if ev.get("excerpt"):
+                st.markdown(f"> {ev['excerpt']}")
+            if ev.get("reason"):
+                st.caption(ev["reason"])
+        with c3:
+            if st.button("▶ 再生", key=f"ci_seek_{ev['id']}"):
+                st.session_state.seek_sec = int(start)
+                st.rerun()
+        st.markdown(
+            f"<div style='height:1px;background:#E5E7EB;margin-bottom:10px;'></div>",
+            unsafe_allow_html=True,
+        )
 
 
 # ==========================================================

@@ -164,6 +164,28 @@ def fetch_events_for_lesson(lesson_id: str) -> list[dict]:
         return []
 
 
+def fetch_check_item_events(lesson_id: str) -> list[dict]:
+    """12項目×秒数の良例/悪例マーカー一覧。
+
+    schema_v3_timeline.sql で定義した `check_item_events` テーブルから読み取る。
+    テーブル未作成・権限不足の場合は空配列を返して UI 側で静かにスキップ。
+    """
+    client = _get_client()
+    if client is None:
+        return []
+    try:
+        result = (
+            client.table("check_item_events")
+            .select("*")
+            .eq("lesson_id", lesson_id)
+            .order("start_sec")
+            .execute()
+        )
+        return result.data or []
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def create_classroom(*, name: str, region: str | None = None) -> dict:
     """教室マスタ追加（UI用）"""
     client = _get_client()
