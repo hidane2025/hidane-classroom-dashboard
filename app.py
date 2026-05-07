@@ -1,17 +1,24 @@
-"""HIDANE Classroom Intelligence — 3層ダッシュボード
+"""HIDANE Classroom Intelligence — 疑惑タグ抽出ダッシュボード
 
 使い方:
     source ../.venv/bin/activate
     streamlit run dashboard/app.py
 
 ビュー:
-    - 社長ビュー（全17教室俯瞰）
-    - 教室長ビュー（自教室の講師時系列）
-    - 講師ビュー（自分の成長記録）
+    - 授業詳細（疑惑タグ）  ← メインビュー（教室長レビュー用）
+    - 動画投入
+    - 社長ビュー（全教室俯瞰）
+    - 教室長ビュー / 講師ビュー（旧スコア参照用・廃止予定）
+    - 管理
+
+更新履歴:
+    2026-05-07 v2: AI採点廃止 → 疑惑タグ抽出方式へ刷新
+    2026-05-07 v3: Vision判定優先＋ low severity 折りたたみ（精度改善）
 """
 from __future__ import annotations
 
 import os
+import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -21,6 +28,8 @@ import plotly.graph_objects as go
 import streamlit as st
 from dotenv import load_dotenv
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 # ダッシュボード側は重量ライブラリ（YOLO/mediapipe等）を読み込まないように
 # dashboard.db_client のみから DB ヘルパーを取得する（Streamlit Cloud 対応）
@@ -41,7 +50,7 @@ from db_client import (
 from ai_coach import ask_coach  # anthropicのみ依存
 from compare_lessons import compare  # anthropicのみ依存
 
-load_dotenv(override=True)  # ローカル開発時のみ作用。Streamlit Cloud では下の st.secrets ブリッジが使われる
+load_dotenv(PROJECT_ROOT / ".env", override=True)
 
 # Streamlit Cloud用: st.secrets の値を環境変数に橋渡し（ローカル開発は .env が優先）
 try:
@@ -256,6 +265,14 @@ def view_ceo():
         render_no_data_notice()
         return
 
+    # 仕様変更お知らせ（2026-05-07）
+    st.warning(
+        "📢 **AI採点機能は廃止しました**（2026-05-07）。"
+        "AIは「疑惑タグ」を抽出し、教室長が動画で判断する運用へ切り替えました。"
+        "個別授業の詳細は **🎥 授業詳細（疑惑タグ）** ビューでご覧ください。"
+        "本ビューは旧スコアデータの参照用に残しています。"
+    )
+
     # 週次集計
     df["week_start"] = df["lesson_date"].dt.to_period("W").dt.start_time
     this_week = df["week_start"].max()
@@ -264,29 +281,40 @@ def view_ceo():
     this_df = df[df["week_start"] == this_week]
     last_df = df[df["week_start"] == last_week]
 
-    this_avg = this_df["overall_score"].mean() if not this_df.empty else 0
-    last_avg = last_df["overall_score"].mean() if not last_df.empty else 0
+    # KPI算出は overall_score がNULLでないレコードのみ対象（pending授業を除外）
+    this_scored = this_df[this_df["overall_score"].notna()]
+    last_scored = last_df[last_df["overall_score"].notna()]
+
+    this_avg = this_scored["overall_score"].mean() if not this_scored.empty else 0.0
+    last_avg = last_scored["overall_score"].mean() if not last_scored.empty else 0.0
+    if pd.isna(this_avg):
+        this_avg = 0.0
+    if pd.isna(last_avg):
+        last_avg = 0.0
     delta = this_avg - last_avg
+    pending_count = len(this_df) - len(this_scored)
 
     cols = st.columns(4)
     with cols[0]:
         kpi_card("全社平均スコア", f"{this_avg:.1f}", f"先週比 {delta:+.1f}")
     with cols[1]:
-        req_1on1 = this_df[this_df["overall_score"] < 70]["teacher_id"].nunique()
+        req_1on1 = this_scored[this_scored["overall_score"] < 70]["teacher_id"].nunique()
         kpi_card("要1on1講師数", f"{req_1on1}", "スコア70未満", BRAND_SECONDARY)
     with cols[2]:
         active_rooms = this_df["classroom_id"].nunique()
         kpi_card("稼働教室数", f"{active_rooms}", "今週授業あり", BRAND_ACCENT)
     with cols[3]:
         lesson_count = len(this_df)
-        kpi_card("今週の授業本数", f"{lesson_count}", "", "#64748b")
+        sub = f"うち{pending_count}本 解析待ち" if pending_count > 0 else ""
+        kpi_card("今週の授業本数", f"{lesson_count}", sub, "#64748b")
 
     st.markdown("---")
 
-    # 教室×週 ヒートマップ
+    # 教室×週 ヒートマップ（採点済みlessonのみ）
     st.subheader("📊 教室×週次スコアヒートマップ")
+    df_scored = df[df["overall_score"].notna()]
     heat_df = (
-        df.groupby(["classroom_name", "week_start"])["overall_score"]
+        df_scored.groupby(["classroom_name", "week_start"])["overall_score"]
         .mean()
         .reset_index()
     )
@@ -303,13 +331,14 @@ def view_ceo():
         fig.update_layout(height=400, coloraxis_colorbar=dict(title="点"))
         st.plotly_chart(fig, use_container_width=True)
 
-    # トップ/ワースト
+    # トップ/ワースト（採点済み lesson のみ）
     col_top, col_worst = st.columns(2)
     with col_top:
         st.subheader("🏆 今週のトップ5")
         top_df = (
-            this_df.groupby("teacher_name")["overall_score"]
+            this_scored.groupby("teacher_name")["overall_score"]
             .mean()
+            .dropna()
             .sort_values(ascending=False)
             .head(5)
             .reset_index()
@@ -321,8 +350,9 @@ def view_ceo():
     with col_worst:
         st.subheader("⚠️ 今週の要介入5名")
         worst_df = (
-            this_df.groupby("teacher_name")["overall_score"]
+            this_scored.groupby("teacher_name")["overall_score"]
             .mean()
+            .dropna()
             .sort_values()
             .head(5)
             .reset_index()
@@ -357,6 +387,13 @@ def view_manager():
     if not classrooms:
         render_no_data_notice()
         return
+
+    # 仕様変更お知らせ（2026-05-07）
+    st.warning(
+        "📢 **AI採点機能は廃止しました**（2026-05-07）。"
+        "AIは「疑惑タグ」を抽出し、教室長が動画で判断する運用です。"
+        "個別授業の詳細は **🎥 授業詳細（疑惑タグ）** からご確認ください。"
+    )
 
     classroom_map = {c["name"]: c["id"] for c in classrooms}
     selected_name = st.sidebar.selectbox("教室を選択", list(classroom_map.keys()))
@@ -514,6 +551,14 @@ def view_manager():
 # ==========================================================
 # ビュー: 講師
 # ==========================================================
+def _teacher_deprecation_notice():
+    st.warning(
+        "📢 **AI採点機能は廃止しました**（2026-05-07）。"
+        "AIは「疑惑タグ」を抽出し、教室長が動画で判断する運用です。"
+        "ご自身の授業の詳細は **🎥 授業詳細（疑惑タグ）** からご確認ください。"
+    )
+
+
 def view_teacher():
     render_brand_header("講師ビュー — 自分の成長記録")
 
@@ -525,6 +570,8 @@ def view_teacher():
     if not teachers:
         render_no_data_notice()
         return
+
+    _teacher_deprecation_notice()
 
     teacher_map = {t["name"]: t["id"] for t in teachers}
     selected_name = st.sidebar.selectbox("あなたの名前", list(teacher_map.keys()))
@@ -796,16 +843,32 @@ def view_admin():
 # ビュー: 授業詳細（動画プレーヤー＋イベント連動）
 # ==========================================================
 KIND_ICONS_V = {
+    # 映像系
     "phone_use": "📱", "sleeping": "😴", "head_down": "🙇",
-    "excessive_motion": "💥", "loud_noise": "🔊", "long_silence": "🤫",
+    "excessive_motion": "🏃", "loud_noise": "🔊", "long_silence": "🤫",
     "eating": "🍫", "other_item": "❓",
+    # 音声系疑惑タグ（2026-05-07 追加）
+    "no_greeting": "👋", "repeat_phrase": "🔁", "slow_tempo": "🐢",
+    "no_instruction": "📝", "long_silence_speech": "🤐",
 }
 KIND_LABELS_V = {
-    "phone_use": "スマホ使用", "sleeping": "居眠り", "head_down": "うつむき継続",
-    "excessive_motion": "ふざけ合い/立ち歩き", "loud_noise": "私語・騒ぎ",
-    "long_silence": "長い沈黙", "eating": "飲食", "other_item": "その他",
+    # 映像系（断定的な表現は避け「要確認」のニュアンスに統一）
+    "phone_use": "スマホ・ゲーム機の可能性", "sleeping": "居眠りの可能性",
+    "head_down": "うつむき継続",
+    "excessive_motion": "動きが多め (要確認)", "loud_noise": "音量上昇 (私語の可能性)",
+    "long_silence": "長い沈黙", "eating": "飲食物の可能性", "other_item": "その他物体",
+    # 音声系疑惑タグ
+    "no_greeting": "挨拶不在", "repeat_phrase": "繰り返し発話",
+    "slow_tempo": "テンポ低下", "no_instruction": "指示不在",
+    "long_silence_speech": "長い沈黙（音声）",
 }
 SEV_COLORS_V = {"low": "#64748b", "medium": "#F28C28", "high": "#C41E24"}
+
+# 疑惑タグの分類（映像系 vs 音声系）
+VISUAL_KINDS = {"phone_use", "sleeping", "head_down", "excessive_motion",
+                "loud_noise", "long_silence", "eating", "other_item"}
+AUDIO_KINDS = {"no_greeting", "repeat_phrase", "slow_tempo",
+               "no_instruction", "long_silence_speech"}
 
 
 def view_lesson_detail():
@@ -825,11 +888,12 @@ def view_lesson_detail():
     labels = {}
     for _, row in df.iterrows():
         date_str = row["lesson_date"].strftime("%Y-%m-%d")
+        status = row.get("status", "")
+        status_badge = "⏳" if status == "pending" else "✅" if status == "done" else "•"
         label = (
-            f"{date_str} / {row.get('classroom_name', '—')} / "
+            f"{status_badge} {date_str} / {row.get('classroom_name', '—')} / "
             f"{row.get('teacher_name', '—')} / "
-            f"{row.get('subject') or '科目未設定'} / "
-            f"{row.get('overall_score', '—')}点"
+            f"{row.get('subject') or '科目未設定'}"
         )
         labels[label] = row["id"]
 
@@ -847,31 +911,42 @@ def view_lesson_detail():
     if "seek_sec" not in st.session_state:
         st.session_state.seek_sec = 0
 
-    # ヘッダーメタ
+    # ヘッダーメタ — Vision優先＋疑惑件数中心（スコアは廃止）
+    video_url = lesson.get("video_url")
+    events = fetch_events_for_lesson(lesson_id)
+    vision_ok_hdr = sum(1 for e in events
+                        if e.get("vision_confirmed") is True and e.get("kind") in VISUAL_KINDS)
+    audio_hdr = sum(1 for e in events if e.get("kind") in AUDIO_KINDS)
+
     cols = st.columns(4)
     with cols[0]:
-        kpi_card("総合スコア",
-                 f"{lesson.get('overall_score', '—')}点" if lesson.get('overall_score') is not None else "—",
-                 f"グレード {lesson.get('grade_letter') or '—'}",
-                 BRAND_PRIMARY)
+        # 📹 Vision確認 件数（最優先指標）
+        kpi_card(
+            "📹 Vision確認",
+            f"{vision_ok_hdr}件",
+            "教室長が必ず動画で確認",
+            BRAND_PRIMARY if vision_ok_hdr > 0 else "#94a3b8",
+        )
     with cols[1]:
-        kpi_card("講師",
-                 (lesson.get("teachers") or {}).get("name", "—"),
-                 lesson.get("subject") or "—",
-                 BRAND_ACCENT)
+        # 🎤 音声疑惑 件数（次点指標）
+        kpi_card(
+            "🎤 音声疑惑",
+            f"{audio_hdr}件",
+            "文字起こしから抽出",
+            BRAND_SECONDARY if audio_hdr > 0 else "#94a3b8",
+        )
     with cols[2]:
-        kpi_card("教室",
-                 (lesson.get("classrooms") or {}).get("name", "—"),
-                 f"{lesson.get('grade') or '—'} / {lesson.get('student_count') or '—'}名",
-                 BRAND_SECONDARY)
+        kpi_card(
+            "講師 / 教室",
+            (lesson.get("teachers") or {}).get("name", "—"),
+            (lesson.get("classrooms") or {}).get("name", "—"),
+            BRAND_ACCENT,
+        )
     with cols[3]:
         dur = lesson.get("video_duration_sec") or 0
         kpi_card("動画尺", f"{dur//60}分{dur%60}秒", lesson.get("lesson_date", "")[:10], "#64748b")
 
     st.markdown("---")
-
-    video_url = lesson.get("video_url")
-    events = fetch_events_for_lesson(lesson_id)
 
     col_v, col_e = st.columns([3, 2])
 
@@ -892,11 +967,53 @@ def view_lesson_detail():
             )
 
     with col_e:
-        st.subheader("🚨 AI検知イベント")
+        st.subheader("🚨 疑惑タグ一覧（教室長レビュー用）")
         if not events:
-            st.success("✅ 問題行動の検知は0件（Vision判定で全て除外）")
+            st.success("✅ 疑惑タグは0件（AIは何も検知しませんでした）")
+            st.caption("※ 動画解析が完了済みで0件の場合、特に問題行動・要確認シーンはありません。")
         else:
-            for ev in events:
+            # 3層に分類（中野さん指示「vision判定の方が優先してください」2026-05-07）:
+            #   Tier1 📹✅ Vision確認済み映像（最優先・教室長が必ず動画で確認すべき）
+            #   Tier2 🎤  音声疑惑タグ（次点・文字起こしから抽出）
+            #   Tier3 📹⚪ Vision評価で問題なし（参考表示・低優先）
+            tier1_vision_ok = []   # vision_confirmed=True
+            tier2_audio = []       # source=audio_transcript
+            tier3_vision_ng = []   # vision_confirmed=False
+            tier_other = []        # vision_confirmed=None で映像系
+            for e in events:
+                kind = e.get("kind", "")
+                vc = e.get("vision_confirmed")
+                if kind in AUDIO_KINDS:
+                    tier2_audio.append(e)
+                elif vc is True:
+                    tier1_vision_ok.append(e)
+                elif vc is False:
+                    tier3_vision_ng.append(e)
+                else:
+                    tier_other.append(e)
+
+            # サマリ: high/medium/low と Vision内訳
+            high_count = sum(1 for e in events if e.get("severity") == "high")
+            med_count = sum(1 for e in events if e.get("severity") == "medium")
+            low_count = sum(1 for e in events if e.get("severity") == "low")
+            st.caption(
+                f"📊 計 **{len(events)}件** ｜ 🔴high {high_count} / 🟡medium {med_count} / ⚪low {low_count}"
+            )
+            st.caption(
+                f"📹 Vision確認 **{len(tier1_vision_ok)}件** / 🎤 音声疑惑 **{len(tier2_audio)}件** "
+                f"／ ⚪ Vision評価で問題なし {len(tier3_vision_ng)}件"
+            )
+            st.caption("各タグの「▶ 再生」で該当シーンへジャンプ → 教室長が動画を見て最終判断")
+
+            sev_order = {"high": 0, "medium": 1, "low": 2}
+
+            def _sort_within_tier(lst):
+                return sorted(
+                    lst,
+                    key=lambda e: (sev_order.get(e.get("severity"), 99), float(e.get("start_sec", 0))),
+                )
+
+            def _render_event_card(ev, *, tier_label: str, dimmed: bool = False):
                 mmss = f"{int(ev['start_sec']) // 60:02d}:{int(ev['start_sec']) % 60:02d}"
                 icon = KIND_ICONS_V.get(ev.get("kind"), "•")
                 label = KIND_LABELS_V.get(ev.get("kind"), ev.get("kind", "—"))
@@ -905,48 +1022,81 @@ def view_lesson_detail():
                     c1, c2, c3 = st.columns([1, 3, 1])
                     with c1:
                         st.markdown(f"**{mmss}**")
+                        st.caption(tier_label)
                     with c2:
-                        st.markdown(f"{icon} **{label}**")
-                        if ev.get("vision_explanation"):
-                            st.caption(ev["vision_explanation"][:100])
-                        elif ev.get("description"):
-                            st.caption(ev["description"][:100])
+                        title_md = f"{icon} **{label}**"
+                        if dimmed:
+                            title_md = f"<span style='opacity:0.55'>{title_md}</span>"
+                            st.markdown(title_md, unsafe_allow_html=True)
+                        else:
+                            st.markdown(title_md)
+                        desc = ev.get("description") or ""
+                        expl = ev.get("vision_explanation") or ""
+                        if desc:
+                            st.caption(desc[:200])
+                        if expl and expl != desc:
+                            kind_local = ev.get("kind", "")
+                            quote_label = "📝 抜粋" if kind_local in AUDIO_KINDS else "👁 Vision"
+                            st.caption(f"{quote_label}: 「{expl[:160]}」")
                     with c3:
                         if st.button("▶ 再生", key=f"seek_{ev['id']}"):
                             st.session_state.seek_sec = int(ev["start_sec"])
                             st.rerun()
                     st.markdown(
-                        f"<div style='height:2px;background:{color};margin-bottom:12px;'></div>",
+                        f"<div style='height:2px;background:{color};margin-bottom:12px;opacity:{0.4 if dimmed else 1};'></div>",
                         unsafe_allow_html=True,
                     )
 
-    # AI講評
+            # ---- Tier 1: Vision確認済み映像（最優先） ----
+            # high/medium は前面、low は折りたたみで参考表示（ノイズ抑制）
+            if tier1_vision_ok:
+                hm = [e for e in tier1_vision_ok if e.get("severity") in ("high", "medium")]
+                lo = [e for e in tier1_vision_ok if e.get("severity") == "low"]
+                st.markdown(f"### 📹✅ Vision確認済み映像 — 最優先")
+                if hm:
+                    st.caption(f"重大度 high/medium のみ {len(hm)}件を表示（教室長は必ず再生確認）")
+                    for ev in _sort_within_tier(hm):
+                        _render_event_card(ev, tier_label="📹✅Vision")
+                else:
+                    st.caption("⚠️ 重大度 high/medium の Vision確認イベントはありません")
+                if lo:
+                    with st.expander(f"📹✅ low severity の Vision確認 {len(lo)}件（軽微・参考）", expanded=False):
+                        for ev in _sort_within_tier(lo):
+                            _render_event_card(ev, tier_label="📹✅Vision(low)")
+
+            # ---- Tier 2: 音声疑惑 ----
+            if tier2_audio:
+                st.markdown(f"### 🎤 音声疑惑タグ（{len(tier2_audio)}件）")
+                for ev in _sort_within_tier(tier2_audio):
+                    _render_event_card(ev, tier_label="🎤音声")
+
+            # ---- Tier-other: Vision未判定の映像 ----
+            if tier_other:
+                st.markdown(f"### 📹? Vision未判定の映像系（{len(tier_other)}件）")
+                for ev in _sort_within_tier(tier_other):
+                    _render_event_card(ev, tier_label="📹?Vision")
+
+            # ---- Tier 3: Vision却下 (折りたたみ) ----
+            if tier3_vision_ng:
+                with st.expander(f"⚪ Vision評価で問題なしと判定（{len(tier3_vision_ng)}件・参考）", expanded=False):
+                    st.caption("Visionが「明らかに勉強中・問題なし」と判断したシーン。念のため参考表示。")
+                    for ev in _sort_within_tier(tier3_vision_ng):
+                        _render_event_card(ev, tier_label="⚪Vision却下", dimmed=True)
+
+    # AI講評（教室長レビュー誘導文）
     st.markdown("---")
-    st.subheader("🤖 AI講評")
+    st.subheader("🤖 AI講評（教室長レビュー誘導）")
     if lesson.get("ai_commentary"):
         st.info(lesson["ai_commentary"])
+    else:
+        st.caption("（AI講評なし）")
 
-    col_good, col_imp = st.columns(2)
-    with col_good:
-        st.markdown("### ✅ 良かった点")
-        for p in lesson.get("good_points") or []:
-            st.markdown(f"- {p}")
-    with col_imp:
-        st.markdown("### 📈 改善ポイント")
-        for p in lesson.get("improvements") or []:
-            st.markdown(f"- {p}")
-
-    # 教科・単元バッジ（AI推定）と問いかけ量サマリ
+    # 教科・単元バッジ（AI推定）と問いかけ量サマリ — 補助情報
     render_subject_badge(lesson)
     render_question_summary(lesson)
 
-    # 12項目チェックシート（scored / skipped 分離）
-    cs_df = load_checklist_scores([lesson_id])
-    if not cs_df.empty:
-        render_checklist_two_blocks(cs_df, lesson_id)
-
-    # 12項目 × 秒数タイムライン（良例/悪例マーカー）
-    render_timeline_view(lesson_id, lesson)
+    # 旧UI（12項目スコア・タイムライン）は廃止しました。
+    # 疑惑タグ抽出方式（教室長判断）に切り替え済みです。 — 2026-05-07
 
 
 # ----------------------------------------------------------
@@ -1368,13 +1518,16 @@ def view_upload():
 # メイン
 # ==========================================================
 VIEWS = {
+    "🎥 授業詳細（疑惑タグ）": view_lesson_detail,
+    "📤 動画投入": view_upload,
     "🏢 社長ビュー": view_ceo,
     "👥 教室長ビュー": view_manager,
     "👤 講師ビュー": view_teacher,
-    "🎥 授業詳細": view_lesson_detail,
-    "📤 動画投入": view_upload,
     "⚙️ 管理": view_admin,
 }
+
+
+DASHBOARD_VERSION = "v2026-05-07-v4 (Vision優先・精度改善版)"
 
 
 def main():
@@ -1386,6 +1539,14 @@ def main():
         st.markdown("## 🎓 授業品質管理")
         view_name = st.radio("ビューを選択", list(VIEWS.keys()))
         st.markdown("---")
+        # 🔖 バージョンスタンプ（新コード反映確認用）
+        st.markdown(
+            f"<div style='background:#FEF3C7;border-left:4px solid #F59E0B;"
+            f"padding:8px 12px;border-radius:4px;font-size:11px;color:#92400E;'>"
+            f"🔖 <b>{DASHBOARD_VERSION}</b><br>"
+            f"このスタンプが見えていれば新UI反映済</div>",
+            unsafe_allow_html=True,
+        )
         st.caption(f"更新時刻 {datetime.now().strftime('%H:%M:%S')}")
         if not _db_available():
             st.error("DB未接続")
