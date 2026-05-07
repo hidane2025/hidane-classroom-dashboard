@@ -122,6 +122,41 @@ def _db_available() -> bool:
 
 
 # ==========================================================
+# Phase A セキュリティ: 動画 signed URL 取得
+# ==========================================================
+@st.cache_data(ttl=300)  # signed URL は 600s 有効なので 300s キャッシュは安全
+def get_video_signed_url(lesson_id: str, public_url_fallback: str | None = None) -> str | None:
+    """Edge Function (create-video-url) を呼んで signed URL を取得。
+
+    Phase A 移行中の挙動:
+    - SUPABASE_URL と VIDEO_FUNCTION_TOKEN が設定されていれば Edge Function を呼ぶ
+    - 失敗 or 未設定なら public_url_fallback を返す（v5以前の public URL）
+    - 完全移行後は fallback を None にすることで signed URL 必須化できる
+    """
+    base = os.getenv("SUPABASE_URL")
+    token = os.getenv("VIDEO_FUNCTION_TOKEN")
+    if not (base and token):
+        return public_url_fallback
+    try:
+        import requests
+        resp = requests.post(
+            f"{base.rstrip('/')}/functions/v1/create-video-url",
+            headers={
+                "x-internal-token": token,
+                "Content-Type": "application/json",
+            },
+            json={"lesson_id": lesson_id},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return resp.json().get("signed_url") or public_url_fallback
+        # 401 / 404 等は fallback
+        return public_url_fallback
+    except Exception:  # noqa: BLE001
+        return public_url_fallback
+
+
+# ==========================================================
 # データ取得（キャッシュ付き）
 # ==========================================================
 @st.cache_data(ttl=60)
@@ -1052,9 +1087,11 @@ def view_lesson_detail():
         # スクロール用アンカー（▶再生ボタンから飛んでくる先）
         st.markdown('<div id="video-player-anchor"></div>', unsafe_allow_html=True)
         st.subheader("🎥 授業動画")
-        if video_url:
+        # Phase A: private bucket 化に対応 — Edge Function 経由で signed URL を取得
+        playback_url = get_video_signed_url(lesson_id, public_url_fallback=video_url)
+        if playback_url:
             # start_time 指定で該当イベント位置から再生
-            st.video(video_url, start_time=int(st.session_state.seek_sec))
+            st.video(playback_url, start_time=int(st.session_state.seek_sec))
             st.caption(
                 f"現在の再生開始位置: {int(st.session_state.seek_sec)//60}:"
                 f"{int(st.session_state.seek_sec)%60:02d}"
@@ -1628,7 +1665,7 @@ VIEWS = {
 }
 
 
-DASHBOARD_VERSION = "v2026-05-08-v5 (Phase B+C・動画スクロール改善)"
+DASHBOARD_VERSION = "v2026-05-08-v6 (Phase A セキュリティ・signed URL対応)"
 
 
 def main():
