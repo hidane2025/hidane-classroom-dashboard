@@ -174,6 +174,54 @@ def load_checklist_scores(lesson_ids: list[str]) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=60)
+def load_lesson_suspicion_counts(lesson_ids: list[str]) -> pd.DataFrame:
+    """Phase C-1: 各レッスンの events を集計して high/medium/low 件数を返す。
+
+    return columns: lesson_id, total_count, high_count, medium_count, low_count,
+                    vision_ok_count, audio_count
+    """
+    if not lesson_ids:
+        return pd.DataFrame()
+    client = _get_supabase_client()
+    if client is None:
+        return pd.DataFrame()
+    try:
+        result = (
+            client.table("events")
+            .select("lesson_id,severity,vision_confirmed,source,kind")
+            .in_("lesson_id", lesson_ids)
+            .execute()
+        )
+        rows = result.data or []
+        if not rows:
+            return pd.DataFrame({"lesson_id": lesson_ids,
+                                "total_count": [0] * len(lesson_ids),
+                                "high_count": [0] * len(lesson_ids),
+                                "medium_count": [0] * len(lesson_ids),
+                                "low_count": [0] * len(lesson_ids),
+                                "vision_ok_count": [0] * len(lesson_ids),
+                                "audio_count": [0] * len(lesson_ids)})
+        df = pd.DataFrame(rows)
+        agg = df.groupby("lesson_id").agg(
+            total_count=("severity", "count"),
+            high_count=("severity", lambda s: (s == "high").sum()),
+            medium_count=("severity", lambda s: (s == "medium").sum()),
+            low_count=("severity", lambda s: (s == "low").sum()),
+            vision_ok_count=("vision_confirmed", lambda s: (s == True).sum()),
+            audio_count=("source", lambda s: (s == "audio_transcript").sum()),
+        ).reset_index()
+        # 全lesson_id を含めて欠損をzeroで埋める
+        all_ids = pd.DataFrame({"lesson_id": lesson_ids})
+        merged = all_ids.merge(agg, on="lesson_id", how="left").fillna(0)
+        for c in ("total_count", "high_count", "medium_count", "low_count",
+                  "vision_ok_count", "audio_count"):
+            merged[c] = merged[c].astype(int)
+        return merged
+    except Exception:  # noqa: BLE001
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=60)
 def load_alerts(active_only: bool = True) -> pd.DataFrame:
     client = _get_supabase_client()
     if client is None:
@@ -254,7 +302,8 @@ def render_no_db_notice():
 # ビュー: 社長
 # ==========================================================
 def view_ceo():
-    render_brand_header("社長ビュー — 全社俯瞰")
+    """Phase C-1: 旧overall_score廃止、疑惑件数ベースの全社俯瞰へ刷新。"""
+    render_brand_header("社長ビュー — 全社俯瞰（疑惑件数ベース）")
 
     if not _db_available():
         render_no_db_notice()
@@ -265,14 +314,6 @@ def view_ceo():
         render_no_data_notice()
         return
 
-    # 仕様変更お知らせ（2026-05-07）
-    st.warning(
-        "📢 **AI採点機能は廃止しました**（2026-05-07）。"
-        "AIは「疑惑タグ」を抽出し、教室長が動画で判断する運用へ切り替えました。"
-        "個別授業の詳細は **🎥 授業詳細（疑惑タグ）** ビューでご覧ください。"
-        "本ビューは旧スコアデータの参照用に残しています。"
-    )
-
     # 週次集計
     df["week_start"] = df["lesson_date"].dt.to_period("W").dt.start_time
     this_week = df["week_start"].max()
@@ -281,25 +322,46 @@ def view_ceo():
     this_df = df[df["week_start"] == this_week]
     last_df = df[df["week_start"] == last_week]
 
-    # KPI算出は overall_score がNULLでないレコードのみ対象（pending授業を除外）
-    this_scored = this_df[this_df["overall_score"].notna()]
-    last_scored = last_df[last_df["overall_score"].notna()]
+    # 全レッスンの疑惑件数を一括ロード（cache 60s）
+    all_ids = df["id"].tolist()
+    counts = load_lesson_suspicion_counts(all_ids)
+    if counts.empty:
+        df["high_count"] = 0
+        df["medium_count"] = 0
+        df["low_count"] = 0
+        df["audio_count"] = 0
+        df["vision_ok_count"] = 0
+    else:
+        df = df.merge(counts, left_on="id", right_on="lesson_id", how="left").fillna(0)
+        for c in ("high_count", "medium_count", "low_count", "audio_count", "vision_ok_count"):
+            if c in df.columns:
+                df[c] = df[c].astype(int)
 
-    this_avg = this_scored["overall_score"].mean() if not this_scored.empty else 0.0
-    last_avg = last_scored["overall_score"].mean() if not last_scored.empty else 0.0
-    if pd.isna(this_avg):
-        this_avg = 0.0
-    if pd.isna(last_avg):
-        last_avg = 0.0
-    delta = this_avg - last_avg
-    pending_count = len(this_df) - len(this_scored)
+    # 完了授業のみKPI集計（status=completed）
+    completed_mask = df["status"] == "completed" if "status" in df.columns else df["overall_score"].notna()
+    this_completed = df[(df["week_start"] == this_week) & completed_mask]
+    last_completed = df[(df["week_start"] == last_week) & completed_mask]
+
+    # 今週の合計 high/medium 件数
+    this_hm = int(this_completed["high_count"].sum() + this_completed["medium_count"].sum())
+    last_hm = int(last_completed["high_count"].sum() + last_completed["medium_count"].sum())
+    delta_hm = this_hm - last_hm
+
+    pending_count = len(this_df) - len(this_completed)
 
     cols = st.columns(4)
     with cols[0]:
-        kpi_card("全社平均スコア", f"{this_avg:.1f}", f"先週比 {delta:+.1f}")
+        kpi_card("今週 要確認 疑惑件数", f"{this_hm}件",
+                 f"先週比 {delta_hm:+d}件（high+medium）",
+                 BRAND_PRIMARY if this_hm > 0 else "#16A34A")
     with cols[1]:
-        req_1on1 = this_scored[this_scored["overall_score"] < 70]["teacher_id"].nunique()
-        kpi_card("要1on1講師数", f"{req_1on1}", "スコア70未満", BRAND_SECONDARY)
+        # high疑惑が3件以上ある講師数（要1on1候補）
+        if not this_completed.empty:
+            per_teacher = this_completed.groupby("teacher_id")["high_count"].sum()
+            req_1on1 = int((per_teacher >= 3).sum())
+        else:
+            req_1on1 = 0
+        kpi_card("要1on1 講師数", f"{req_1on1}", "high疑惑3件以上", BRAND_SECONDARY)
     with cols[2]:
         active_rooms = this_df["classroom_id"].nunique()
         kpi_card("稼働教室数", f"{active_rooms}", "今週授業あり", BRAND_ACCENT)
@@ -310,56 +372,70 @@ def view_ceo():
 
     st.markdown("---")
 
-    # 教室×週 ヒートマップ（採点済みlessonのみ）
-    st.subheader("📊 教室×週次スコアヒートマップ")
-    df_scored = df[df["overall_score"].notna()]
-    heat_df = (
-        df_scored.groupby(["classroom_name", "week_start"])["overall_score"]
-        .mean()
-        .reset_index()
-    )
-    if not heat_df.empty:
-        pivot = heat_df.pivot(
-            index="classroom_name", columns="week_start", values="overall_score"
+    # 教室×週 ヒートマップ（疑惑件数 high+medium）
+    st.subheader("📊 教室×週次 疑惑件数ヒートマップ（high + medium）")
+    completed_for_heat = df[completed_mask].copy()
+    if not completed_for_heat.empty:
+        completed_for_heat["hm_count"] = (
+            completed_for_heat["high_count"] + completed_for_heat["medium_count"]
         )
-        fig = px.imshow(
-            pivot,
-            labels=dict(x="週", y="教室", color="平均スコア"),
-            color_continuous_scale="RdYlGn",
-            aspect="auto",
+        heat_df = (
+            completed_for_heat.groupby(["classroom_name", "week_start"])["hm_count"]
+            .sum()
+            .reset_index()
         )
-        fig.update_layout(height=400, coloraxis_colorbar=dict(title="点"))
-        st.plotly_chart(fig, use_container_width=True)
+        if not heat_df.empty:
+            pivot = heat_df.pivot(
+                index="classroom_name", columns="week_start", values="hm_count"
+            )
+            fig = px.imshow(
+                pivot,
+                labels=dict(x="週", y="教室", color="疑惑件数"),
+                color_continuous_scale="Reds",
+                aspect="auto",
+            )
+            fig.update_layout(height=400, coloraxis_colorbar=dict(title="件"))
+            st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("完了済み授業がまだありません。")
 
-    # トップ/ワースト（採点済み lesson のみ）
+    # トップ/ワースト（疑惑件数ベース）
     col_top, col_worst = st.columns(2)
     with col_top:
-        st.subheader("🏆 今週のトップ5")
-        top_df = (
-            this_scored.groupby("teacher_name")["overall_score"]
-            .mean()
-            .dropna()
-            .sort_values(ascending=False)
-            .head(5)
-            .reset_index()
-        )
-        top_df.columns = ["講師", "平均スコア"]
-        top_df["平均スコア"] = top_df["平均スコア"].round(1)
-        st.dataframe(top_df, use_container_width=True, hide_index=True)
+        st.subheader("🏆 今週のトップ5（疑惑が少ない講師）")
+        if not this_completed.empty:
+            top_df = (
+                this_completed.assign(hm_count=lambda d: d["high_count"] + d["medium_count"])
+                .groupby("teacher_name")["hm_count"]
+                .mean()
+                .dropna()
+                .sort_values(ascending=True)  # 少ない順
+                .head(5)
+                .reset_index()
+            )
+            top_df.columns = ["講師", "平均疑惑件数"]
+            top_df["平均疑惑件数"] = top_df["平均疑惑件数"].round(1)
+            st.dataframe(top_df, use_container_width=True, hide_index=True)
+        else:
+            st.caption("（データなし）")
 
     with col_worst:
-        st.subheader("⚠️ 今週の要介入5名")
-        worst_df = (
-            this_scored.groupby("teacher_name")["overall_score"]
-            .mean()
-            .dropna()
-            .sort_values()
-            .head(5)
-            .reset_index()
-        )
-        worst_df.columns = ["講師", "平均スコア"]
-        worst_df["平均スコア"] = worst_df["平均スコア"].round(1)
-        st.dataframe(worst_df, use_container_width=True, hide_index=True)
+        st.subheader("⚠️ 今週の要介入5名（疑惑件数 多い順）")
+        if not this_completed.empty:
+            worst_df = (
+                this_completed.assign(hm_count=lambda d: d["high_count"] + d["medium_count"])
+                .groupby("teacher_name")["hm_count"]
+                .mean()
+                .dropna()
+                .sort_values(ascending=False)  # 多い順
+                .head(5)
+                .reset_index()
+            )
+            worst_df.columns = ["講師", "平均疑惑件数"]
+            worst_df["平均疑惑件数"] = worst_df["平均疑惑件数"].round(1)
+            st.dataframe(worst_df, use_container_width=True, hide_index=True)
+        else:
+            st.caption("（データなし）")
 
     # アラート
     st.markdown("---")
@@ -377,7 +453,8 @@ def view_ceo():
 # ビュー: 教室長
 # ==========================================================
 def view_manager():
-    render_brand_header("教室長ビュー — 自教室の講師管理")
+    """Phase C-1: 旧overall_scoreを廃止、自教室の講師ごと疑惑件数推移を表示。"""
+    render_brand_header("教室長ビュー — 自教室の講師管理（疑惑件数ベース）")
 
     if not _db_available():
         render_no_db_notice()
@@ -387,13 +464,6 @@ def view_manager():
     if not classrooms:
         render_no_data_notice()
         return
-
-    # 仕様変更お知らせ（2026-05-07）
-    st.warning(
-        "📢 **AI採点機能は廃止しました**（2026-05-07）。"
-        "AIは「疑惑タグ」を抽出し、教室長が動画で判断する運用です。"
-        "個別授業の詳細は **🎥 授業詳細（疑惑タグ）** からご確認ください。"
-    )
 
     classroom_map = {c["name"]: c["id"] for c in classrooms}
     selected_name = st.sidebar.selectbox("教室を選択", list(classroom_map.keys()))
@@ -409,25 +479,39 @@ def view_manager():
         st.info(f"「{selected_name}」の授業データがまだありません。")
         return
 
+    # 教室内の全レッスンの疑惑件数をロード
+    counts = load_lesson_suspicion_counts(room_df["id"].tolist())
+    if not counts.empty:
+        room_df = room_df.merge(counts, left_on="id", right_on="lesson_id", how="left").fillna(0)
+        for c in ("high_count", "medium_count", "low_count", "audio_count", "vision_ok_count"):
+            if c in room_df.columns:
+                room_df[c] = room_df[c].astype(int)
+    else:
+        for c in ("high_count", "medium_count", "low_count"):
+            room_df[c] = 0
+
     # 自教室の講師一覧（直近4週）
     recent_start = pd.Timestamp(date.today() - timedelta(weeks=4))
     recent = room_df[room_df["lesson_date"] >= recent_start]
 
     summary = (
-        recent.groupby("teacher_name")
+        recent.assign(hm=lambda d: d["high_count"] + d["medium_count"])
+        .groupby("teacher_name")
         .agg(
-            平均スコア=("overall_score", "mean"),
+            平均疑惑件数=("hm", "mean"),
+            high合計=("high_count", "sum"),
             授業本数=("id", "count"),
             最終授業日=("lesson_date", "max"),
         )
         .round(1)
-        .sort_values("平均スコア", ascending=False)
+        .sort_values("平均疑惑件数", ascending=True)  # 少ない順
         .reset_index()
     )
-    summary["要1on1"] = summary["平均スコア"].apply(lambda s: "⚠️" if s < 70 else "")
+    summary["要1on1"] = summary["high合計"].apply(lambda s: "⚠️" if s >= 3 else "")
 
-    st.subheader(f"📋 {selected_name} 講師一覧（直近4週）")
+    st.subheader(f"📋 {selected_name} 講師一覧（直近4週・疑惑件数）")
     st.dataframe(summary, use_container_width=True, hide_index=True)
+    st.caption("※ 「平均疑惑件数」= high+medium 合計の授業平均 / 「要1on1」= 期間内 high合計 ≥ 3")
 
     # 講師選択→時系列
     teachers = summary["teacher_name"].tolist()
@@ -439,24 +523,34 @@ def view_manager():
 
         col1, col2 = st.columns([2, 1])
         with col1:
-            st.subheader(f"📈 {selected_teacher} — スコア時系列")
+            st.subheader(f"📈 {selected_teacher} — 疑惑件数推移")
+            plot_df = teacher_df.copy()
+            plot_df["high+medium"] = plot_df["high_count"] + plot_df["medium_count"]
             fig = px.line(
-                teacher_df,
-                x="lesson_date", y="overall_score",
+                plot_df,
+                x="lesson_date", y=["high_count", "medium_count", "low_count"],
                 markers=True,
-                labels={"lesson_date": "日付", "overall_score": "スコア"},
+                labels={"lesson_date": "日付", "value": "件数"},
+                color_discrete_map={
+                    "high_count": "#C41E24",
+                    "medium_count": "#F28C28",
+                    "low_count": "#94a3b8",
+                },
             )
-            fig.update_traces(line_color=BRAND_PRIMARY)
-            fig.update_layout(yaxis_range=[0, 100], height=350)
+            fig.update_layout(height=350, legend_title_text="重大度")
             st.plotly_chart(fig, use_container_width=True)
 
         with col2:
             st.subheader("🎯 直近の授業")
             latest = teacher_df.iloc[-1]
-            score = latest.get("overall_score")
-            grade = latest.get("grade_letter") or "—"
-            st.metric("最新スコア", f"{score}点" if score is not None else "—",
-                     f"グレード: {grade}")
+            high_n = int(latest.get("high_count", 0) or 0)
+            med_n = int(latest.get("medium_count", 0) or 0)
+            audio_n = int(latest.get("audio_count", 0) or 0)
+            st.metric(
+                "最新授業の疑惑件数",
+                f"{high_n + med_n}件",
+                f"🔴 high {high_n} / 🟡 medium {med_n}",
+            )
             try:
                 date_str = latest["lesson_date"].strftime("%Y-%m-%d")
             except Exception:  # noqa: BLE001
@@ -465,35 +559,8 @@ def view_manager():
             if latest.get("ai_commentary"):
                 st.info(latest["ai_commentary"])
 
-        # 12項目レーダー（AIが自信を持って判定する scored 5項目のみ）
-        recent_lesson_ids = teacher_df["id"].tolist()[-5:]
-        cs_df = load_checklist_scores(recent_lesson_ids)
-        scored_df = filter_scored_items(cs_df)
-        if not scored_df.empty:
-            avg_by_item = (
-                scored_df.groupby(["item_id", "item_title"])["score"]
-                .mean()
-                .reset_index()
-                .sort_values("item_id")
-            )
-            st.subheader("🎯 AI判定5項目レーダー（直近5授業平均）")
-            st.caption(
-                "※ AIが自信を持って判定できる 5 項目のみで描画しています。"
-                "残り7項目は授業詳細ビューで教室長が個別評価してください。"
-            )
-            fig = go.Figure()
-            fig.add_trace(go.Scatterpolar(
-                r=avg_by_item["score"],
-                theta=avg_by_item["item_title"],
-                fill="toself",
-                line_color=BRAND_PRIMARY,
-                name=selected_teacher,
-            ))
-            fig.update_layout(
-                polar=dict(radialaxis=dict(visible=True, range=[0, 5])),
-                height=450,
-            )
-            st.plotly_chart(fig, use_container_width=True)
+        # 旧 12項目レーダー は廃止（疑惑タグ抽出方式に切替済み・2026-05-08）
+        # 必要なら授業詳細ビューで個別レビューしてください。
 
         # ビフォーアフター比較
         st.markdown("---")
@@ -560,7 +627,8 @@ def _teacher_deprecation_notice():
 
 
 def view_teacher():
-    render_brand_header("講師ビュー — 自分の成長記録")
+    """Phase C-1: 旧overall_score廃止、自分の疑惑件数推移と AI コーチ対話を表示。"""
+    render_brand_header("講師ビュー — 自分の成長記録（疑惑件数ベース）")
 
     if not _db_available():
         render_no_db_notice()
@@ -570,8 +638,6 @@ def view_teacher():
     if not teachers:
         render_no_data_notice()
         return
-
-    _teacher_deprecation_notice()
 
     teacher_map = {t["name"]: t["id"] for t in teachers}
     selected_name = st.sidebar.selectbox("あなたの名前", list(teacher_map.keys()))
@@ -586,80 +652,74 @@ def view_teacher():
     hist_df["lesson_date"] = pd.to_datetime(hist_df["lesson_date"])
     hist_df = hist_df.sort_values("lesson_date")
 
+    # 疑惑件数を join
+    counts = load_lesson_suspicion_counts(hist_df["id"].tolist())
+    if not counts.empty:
+        hist_df = hist_df.merge(counts, left_on="id", right_on="lesson_id", how="left").fillna(0)
+        for c in ("high_count", "medium_count", "low_count"):
+            if c in hist_df.columns:
+                hist_df[c] = hist_df[c].astype(int)
+    else:
+        for c in ("high_count", "medium_count", "low_count"):
+            hist_df[c] = 0
+
     latest = hist_df.iloc[-1]
     prev = hist_df.iloc[-2] if len(hist_df) > 1 else None
 
+    latest_hm = int(latest["high_count"] + latest["medium_count"])
+    prev_hm = int(prev["high_count"] + prev["medium_count"]) if prev is not None else 0
+    delta = latest_hm - prev_hm
+
     cols = st.columns(3)
     with cols[0]:
-        delta = (latest["overall_score"] - prev["overall_score"]) if prev is not None else 0
-        kpi_card("最新スコア", f"{latest['overall_score']}", f"前回比 {delta:+}点", BRAND_PRIMARY)
+        kpi_card(
+            "最新授業の疑惑件数",
+            f"{latest_hm}件",
+            f"前回比 {delta:+d}件" if prev is not None else "",
+            BRAND_PRIMARY if latest_hm > 0 else "#16A34A",
+        )
     with cols[1]:
-        kpi_card("グレード", latest.get("grade_letter") or "—", "", BRAND_SECONDARY)
+        kpi_card("🔴 high", f"{int(latest['high_count'])}件", "", BRAND_SECONDARY)
     with cols[2]:
-        kpi_card("今月の授業本数", f"{len(hist_df[hist_df['lesson_date'] >= pd.Timestamp.now() - pd.Timedelta(days=30)])}", "", BRAND_ACCENT)
+        kpi_card(
+            "今月の授業本数",
+            f"{len(hist_df[hist_df['lesson_date'] >= pd.Timestamp.now() - pd.Timedelta(days=30)])}",
+            "",
+            BRAND_ACCENT,
+        )
 
     st.markdown("---")
 
     col1, col2 = st.columns([2, 1])
     with col1:
-        st.subheader("📈 あなたのスコア推移")
+        st.subheader("📈 あなたの疑惑件数推移")
         fig = px.line(
             hist_df,
-            x="lesson_date", y="overall_score",
+            x="lesson_date", y=["high_count", "medium_count", "low_count"],
             markers=True,
-            labels={"lesson_date": "日付", "overall_score": "スコア"},
+            labels={"lesson_date": "日付", "value": "件数"},
+            color_discrete_map={
+                "high_count": "#C41E24",
+                "medium_count": "#F28C28",
+                "low_count": "#94a3b8",
+            },
         )
-        fig.update_traces(line_color=BRAND_PRIMARY)
-        fig.update_layout(yaxis_range=[0, 100], height=350)
+        fig.update_layout(height=350, legend_title_text="重大度")
         st.plotly_chart(fig, use_container_width=True)
 
     with col2:
-        st.subheader("✅ 直近の良かった点")
-        good = latest.get("good_points") or []
-        for pt in (good if isinstance(good, list) else []):
-            st.markdown(f"- {pt}")
+        st.subheader("📋 直近授業のコメント")
+        if latest.get("ai_commentary"):
+            st.info(latest["ai_commentary"])
+        else:
+            st.caption("（AI講評なし）")
 
-        st.subheader("📈 改善ポイント")
-        imp = latest.get("improvements") or []
-        for pt in (imp if isinstance(imp, list) else []):
-            st.markdown(f"- {pt}")
-
-    # 12項目レーダー（AIが自信を持って判定する scored 5項目のみ）
-    cs_df = load_checklist_scores(hist_df["id"].tolist()[-5:])
-    scored_df = filter_scored_items(cs_df)
-    if not scored_df.empty:
-        st.markdown("---")
-        st.subheader("🎯 AI判定5項目（直近5授業平均）")
-        st.caption(
-            "※ AIが自信を持って判定できる 5 項目のみ表示。"
-            "残り7項目は教室長が動画を観て個別評価する設計です。"
-        )
-        avg = (
-            scored_df.groupby(["item_id", "item_title"])["score"]
-            .mean()
-            .reset_index()
-            .sort_values("item_id")
-        )
-        fig = go.Figure()
-        fig.add_trace(go.Scatterpolar(
-            r=avg["score"],
-            theta=avg["item_title"],
-            fill="toself",
-            line_color=BRAND_PRIMARY,
-            name=selected_name,
-        ))
-        fig.update_layout(
-            polar=dict(radialaxis=dict(visible=True, range=[0, 5])),
-            height=500,
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-    # AIコーチ対話
+    # AIコーチ対話（疑惑件数ベースに簡易移行）
     st.markdown("---")
     st.subheader("💬 AIコーチに相談する")
     q = st.text_area(
         "聞きたいこと",
-        placeholder="例: 今回3点だった「生徒との向き合い」を4点に上げるには？",
+        placeholder="例: 私の最新授業で疑惑が多かった理由を教えて",
         key="coach_question",
     )
     if st.button("相談する", type="primary"):
@@ -667,22 +727,8 @@ def view_teacher():
             st.warning("質問を入力してください")
         else:
             with st.spinner("AIコーチが考えています…"):
+                # 旧 checklist_avg は廃止。疑惑件数の集計を渡す。
                 checklist_avg_map: dict[int, dict] = {}
-                # scored のみで集計（信頼度の低い項目をコーチに渡さない）
-                coach_src = filter_scored_items(cs_df)
-                if not coach_src.empty:
-                    agg = (
-                        coach_src.groupby(["item_id", "item_title"])["score"]
-                        .mean()
-                        .reset_index()
-                    )
-                    for _, row in agg.iterrows():
-                        if row["score"] is None or pd.isna(row["score"]):
-                            continue
-                        checklist_avg_map[int(row["item_id"])] = {
-                            "title": row["item_title"],
-                            "avg_score": float(row["score"]),
-                        }
                 resp = ask_coach(
                     teacher_name=selected_name,
                     question=q,
