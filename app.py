@@ -956,6 +956,58 @@ def view_lesson_detail():
     # session state でシーク制御
     if "seek_sec" not in st.session_state:
         st.session_state.seek_sec = 0
+    if "scroll_to_video" not in st.session_state:
+        st.session_state.scroll_to_video = False
+
+    # ▶ 再生ボタン押下直後 → 動画位置に自動スクロール（中野さん指示2026-05-08）
+    if st.session_state.scroll_to_video:
+        st.session_state.scroll_to_video = False
+        st.markdown(
+            """
+            <script>
+                (function() {
+                    function tryScroll(retries) {
+                        // Streamlit iframe 内側 / 外側どちらでも動くようにフォールバック
+                        const docs = [];
+                        try { docs.push(window.document); } catch (e) {}
+                        try { docs.push(window.parent.document); } catch (e) {}
+                        try { docs.push(window.top.document); } catch (e) {}
+                        for (const d of docs) {
+                            if (!d) continue;
+                            const anchor = d.getElementById('video-player-anchor');
+                            if (anchor) {
+                                anchor.scrollIntoView({behavior: 'smooth', block: 'start'});
+                                return true;
+                            }
+                        }
+                        if (retries > 0) {
+                            setTimeout(() => tryScroll(retries - 1), 100);
+                        }
+                        return false;
+                    }
+                    setTimeout(() => tryScroll(8), 50);
+                })();
+            </script>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    # 動画コラムを画面上部に sticky で固定（疑惑タグリストをスクロールしても見える）
+    st.markdown(
+        """
+        <style>
+        /* 動画コラム（左側）を sticky で画面上部に張り付ける */
+        div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child {
+            position: sticky;
+            top: 4rem;
+            align-self: flex-start;
+            z-index: 5;
+            background: white;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
     # ヘッダーメタ — Vision優先＋疑惑件数中心（スコアは廃止）
     video_url = lesson.get("video_url")
@@ -997,6 +1049,8 @@ def view_lesson_detail():
     col_v, col_e = st.columns([3, 2])
 
     with col_v:
+        # スクロール用アンカー（▶再生ボタンから飛んでくる先）
+        st.markdown('<div id="video-player-anchor"></div>', unsafe_allow_html=True)
         st.subheader("🎥 授業動画")
         if video_url:
             # start_time 指定で該当イベント位置から再生
@@ -1087,6 +1141,7 @@ def view_lesson_detail():
                     with c3:
                         if st.button("▶ 再生", key=f"seek_{ev['id']}"):
                             st.session_state.seek_sec = int(ev["start_sec"])
+                            st.session_state.scroll_to_video = True
                             st.rerun()
                     st.markdown(
                         f"<div style='height:2px;background:{color};margin-bottom:12px;opacity:{0.4 if dimmed else 1};'></div>",
@@ -1573,7 +1628,7 @@ VIEWS = {
 }
 
 
-DASHBOARD_VERSION = "v2026-05-07-v4 (Vision優先・精度改善版)"
+DASHBOARD_VERSION = "v2026-05-08-v5 (Phase B+C・動画スクロール改善)"
 
 
 def main():
