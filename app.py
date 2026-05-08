@@ -1027,33 +1027,13 @@ def view_lesson_detail():
             unsafe_allow_html=True,
         )
 
-    # 動画固定 + フローティング「🎥 動画に戻る」ボタン（中野さん指示2026-05-08）
-    # Streamlit 制約: position:sticky は親 overflow の影響で効かないことが多い。
-    # 親の overflow を上書き + 動画 column を sticky 化 + 万一無効でも fallback で
-    # フローティングボタンが残るように二重防御。
+    # フローティング「🎥 動画に戻る」ボタンのみ（CSS sticky は画面スクロール破壊リスクで撤去）
+    # 中野さん指摘「ツール画面自体がスクロールできない」(2026-05-08) を受けて、
+    # 親 container の overflow を触らない・動画 sticky を諦める方針に戻した。
+    # 代わりに anchor link でワンクリックで動画位置にジャンプできるようにする。
     st.markdown(
         """
         <style>
-        /* 親の overflow を上書きして sticky を効くようにする */
-        section[data-testid="stMain"], section[data-testid="stMain"] > div,
-        section[data-testid="stMainBlockContainer"], div[data-testid="stVerticalBlock"] {
-            overflow: visible !important;
-        }
-        /* 動画コラム（最初のコラム）を sticky で画面上部に張り付け */
-        div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child {
-            position: sticky !important;
-            top: 1rem !important;
-            align-self: flex-start !important;
-            z-index: 100 !important;
-            background: white !important;
-            max-height: calc(100vh - 2rem);
-            overflow-y: auto !important;
-        }
-        /* video element自体も上端に張り付け */
-        div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child video {
-            max-height: 60vh;
-        }
-        /* フローティング動画ボタン（fallback・必ず効く） */
         .floating-video-btn {
             position: fixed !important;
             bottom: 24px;
@@ -1717,7 +1697,7 @@ VIEWS = {
 }
 
 
-DASHBOARD_VERSION = "v2026-05-08-v8 (動画sticky強化+詳細折りたたみ)"
+DASHBOARD_VERSION = "v2026-05-08-v9 (画面スクロール復旧+折りたたみ維持)"
 
 
 def main():
