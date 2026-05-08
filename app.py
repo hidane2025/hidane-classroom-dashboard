@@ -1027,11 +1027,13 @@ def view_lesson_detail():
             unsafe_allow_html=True,
         )
 
-    # 動画コラムを画面上部に sticky で固定（疑惑タグリストをスクロールしても見える）
+    # フローティング「🎥 動画に戻る」ボタン（右下固定・どこからでもワンクリックで動画へ）
+    # CSS sticky は Streamlit の深いネスト構造で効かないことがあるため、
+    # 確実に動く position:fixed の anchor link で実装する。
     st.markdown(
         """
         <style>
-        /* 動画コラム（左側）を sticky で画面上部に張り付ける */
+        /* 動画コラムをできるだけ sticky で固定（環境により無効でも fallback あり） */
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child {
             position: sticky;
             top: 4rem;
@@ -1039,7 +1041,28 @@ def view_lesson_detail():
             z-index: 5;
             background: white;
         }
+        /* フローティング動画ボタン（必ず効く・全画面どこからでも） */
+        .floating-video-btn {
+            position: fixed !important;
+            bottom: 24px;
+            right: 24px;
+            z-index: 9999;
+            background: linear-gradient(135deg, #C41E24, #8B0000);
+            color: white !important;
+            padding: 14px 22px;
+            border-radius: 30px;
+            text-decoration: none !important;
+            font-weight: 600;
+            font-size: 14px;
+            box-shadow: 0 6px 20px rgba(196, 30, 36, 0.4);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .floating-video-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 24px rgba(196, 30, 36, 0.5);
+        }
         </style>
+        <a href="#video-player-anchor" class="floating-video-btn">🎥 動画に戻る</a>
         """,
         unsafe_allow_html=True,
     )
@@ -1665,7 +1688,7 @@ VIEWS = {
 }
 
 
-DASHBOARD_VERSION = "v2026-05-08-v6 (Phase A セキュリティ・signed URL対応)"
+DASHBOARD_VERSION = "v2026-05-08-v7 (フローティング動画ボタン)"
 
 
 def main():
