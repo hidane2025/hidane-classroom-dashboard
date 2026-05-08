@@ -1027,21 +1027,33 @@ def view_lesson_detail():
             unsafe_allow_html=True,
         )
 
-    # フローティング「🎥 動画に戻る」ボタン（右下固定・どこからでもワンクリックで動画へ）
-    # CSS sticky は Streamlit の深いネスト構造で効かないことがあるため、
-    # 確実に動く position:fixed の anchor link で実装する。
+    # 動画固定 + フローティング「🎥 動画に戻る」ボタン（中野さん指示2026-05-08）
+    # Streamlit 制約: position:sticky は親 overflow の影響で効かないことが多い。
+    # 親の overflow を上書き + 動画 column を sticky 化 + 万一無効でも fallback で
+    # フローティングボタンが残るように二重防御。
     st.markdown(
         """
         <style>
-        /* 動画コラムをできるだけ sticky で固定（環境により無効でも fallback あり） */
-        div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child {
-            position: sticky;
-            top: 4rem;
-            align-self: flex-start;
-            z-index: 5;
-            background: white;
+        /* 親の overflow を上書きして sticky を効くようにする */
+        section[data-testid="stMain"], section[data-testid="stMain"] > div,
+        section[data-testid="stMainBlockContainer"], div[data-testid="stVerticalBlock"] {
+            overflow: visible !important;
         }
-        /* フローティング動画ボタン（必ず効く・全画面どこからでも） */
+        /* 動画コラム（最初のコラム）を sticky で画面上部に張り付け */
+        div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child {
+            position: sticky !important;
+            top: 1rem !important;
+            align-self: flex-start !important;
+            z-index: 100 !important;
+            background: white !important;
+            max-height: calc(100vh - 2rem);
+            overflow-y: auto !important;
+        }
+        /* video element自体も上端に張り付け */
+        div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child video {
+            max-height: 60vh;
+        }
+        /* フローティング動画ボタン（fallback・必ず効く） */
         .floating-video-btn {
             position: fixed !important;
             bottom: 24px;
@@ -1174,10 +1186,25 @@ def view_lesson_detail():
                 )
 
             def _render_event_card(ev, *, tier_label: str, dimmed: bool = False):
-                mmss = f"{int(ev['start_sec']) // 60:02d}:{int(ev['start_sec']) % 60:02d}"
+                """疑惑タグ1件のカード描画。
+
+                Phase修正 (2026-05-08): 中野さん指示で長文 description / vision_explanation を
+                折りたたみ表示にし、リスト全体を圧縮（スクロール量を削減）。
+                各カードはまず時刻+ラベル+サマリ40字+再生ボタンの一行表示。
+                クリックで「📄 詳細」expander が展開し全文表示。
+                """
+                mmss = f"{int(ev['start_sec']) // 60:02d}:{int(ev['start_sec'])%60:02d}"
                 icon = KIND_ICONS_V.get(ev.get("kind"), "•")
                 label = KIND_LABELS_V.get(ev.get("kind"), ev.get("kind", "—"))
                 color = SEV_COLORS_V.get(ev.get("severity"), "#64748b")
+                desc = ev.get("description") or ""
+                expl = ev.get("vision_explanation") or ""
+                kind_local = ev.get("kind", "")
+                # 一行サマリ（40文字に切り詰め）
+                summary_src = (desc or expl or "").strip()
+                summary = summary_src[:40] + ("…" if len(summary_src) > 40 else "")
+                has_more = len(desc) > 40 or (expl and expl != desc and len(expl) > 0)
+
                 with st.container():
                     c1, c2, c3 = st.columns([1, 3, 1])
                     with c1:
@@ -1190,21 +1217,23 @@ def view_lesson_detail():
                             st.markdown(title_md, unsafe_allow_html=True)
                         else:
                             st.markdown(title_md)
-                        desc = ev.get("description") or ""
-                        expl = ev.get("vision_explanation") or ""
-                        if desc:
-                            st.caption(desc[:200])
-                        if expl and expl != desc:
-                            kind_local = ev.get("kind", "")
-                            quote_label = "📝 抜粋" if kind_local in AUDIO_KINDS else "👁 Vision"
-                            st.caption(f"{quote_label}: 「{expl[:160]}」")
+                        if summary:
+                            st.caption(summary)
                     with c3:
                         if st.button("▶ 再生", key=f"seek_{ev['id']}"):
                             st.session_state.seek_sec = int(ev["start_sec"])
                             st.session_state.scroll_to_video = True
                             st.rerun()
+                    # 詳細は折りたたみ（クリックで展開）
+                    if has_more:
+                        with st.expander("📄 詳細を表示", expanded=False):
+                            if desc:
+                                st.markdown(f"**説明**: {desc}")
+                            if expl and expl != desc:
+                                quote_label = "📝 抜粋" if kind_local in AUDIO_KINDS else "👁 Vision所見"
+                                st.markdown(f"**{quote_label}**: 「{expl}」")
                     st.markdown(
-                        f"<div style='height:2px;background:{color};margin-bottom:12px;opacity:{0.4 if dimmed else 1};'></div>",
+                        f"<div style='height:2px;background:{color};margin-bottom:8px;opacity:{0.4 if dimmed else 1};'></div>",
                         unsafe_allow_html=True,
                     )
 
@@ -1688,7 +1717,7 @@ VIEWS = {
 }
 
 
-DASHBOARD_VERSION = "v2026-05-08-v7 (フローティング動画ボタン)"
+DASHBOARD_VERSION = "v2026-05-08-v8 (動画sticky強化+詳細折りたたみ)"
 
 
 def main():
