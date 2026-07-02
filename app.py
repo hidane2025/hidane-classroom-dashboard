@@ -965,12 +965,15 @@ def view_lesson_detail():
         return
 
     # 授業選択肢
+    # 監査 2026-07-02 U#2: 旧実装は "done" 判定だったが worker は "completed" を書くため
+    # 完了バッジが一度も表示されなかった。全statusを網羅したバッジに修正。
+    STATUS_BADGES = {"pending": "⏳", "analyzing": "🔄", "completed": "✅", "failed": "❌"}
     df = df.sort_values("lesson_date", ascending=False)
     labels = {}
     for _, row in df.iterrows():
         date_str = row["lesson_date"].strftime("%Y-%m-%d")
         status = row.get("status", "")
-        status_badge = "⏳" if status == "pending" else "✅" if status == "done" else "•"
+        status_badge = STATUS_BADGES.get(status, "•")
         label = (
             f"{status_badge} {date_str} / {row.get('classroom_name', '—')} / "
             f"{row.get('teacher_name', '—')} / "
@@ -1120,7 +1123,20 @@ def view_lesson_detail():
 
     with col_e:
         st.subheader("🚨 疑惑タグ一覧（教室長レビュー用）")
-        if not events:
+        # 監査 2026-07-02 U#1: 未解析（pending/analyzing/failed）の授業を
+        # 「疑惑0件=問題なし」と誤読させないため、status を先に分岐する。
+        lesson_status = lesson.get("status", "")
+        if lesson_status == "pending":
+            st.info("⏳ この授業は**解析待ち**です。ワーカーが自動で解析を開始します（通常10分以内）。")
+        elif lesson_status == "analyzing":
+            st.info("🔄 この授業は**解析中**です。完了まで数分お待ちください（画面を再読み込みすると更新されます）。")
+        elif lesson_status == "failed":
+            st.error(
+                "❌ この授業の解析は**失敗**しました。\n\n"
+                f"エラー内容: {lesson.get('notes') or '（記録なし）'}\n\n"
+                "お手数ですが「📤 動画投入」から再アップロードするか、管理者にご連絡ください。"
+            )
+        elif not events:
             st.success("✅ 疑惑タグは0件（AIは何も検知しませんでした）")
             st.caption("※ 動画解析が完了済みで0件の場合、特に問題行動・要確認シーンはありません。")
         else:
@@ -1666,21 +1682,30 @@ def view_upload():
 
     # 解析待ち一覧
     st.markdown("---")
-    st.subheader("⏳ 解析待ち授業一覧")
+    st.subheader("⏳ 未完了の授業一覧（解析待ち・解析中・失敗）")
     pending = fetch_pending_lessons()
     if not pending:
-        st.caption("解析待ちの授業はありません。")
+        st.caption("未完了の授業はありません（全て解析済みです）。")
     else:
+        # 監査 2026-07-02 U#4: failed をここに可視化（以前は画面から消えていた）
+        STATUS_JA = {"pending": "⏳ 解析待ち", "analyzing": "🔄 解析中", "failed": "❌ 失敗"}
         rows = []
+        failed_count = 0
         for p in pending:
+            status = p.get("status", "—")
+            if status == "failed":
+                failed_count += 1
             rows.append({
                 "投入日時": p.get("created_at", "—")[:19].replace("T", " "),
                 "講師": (p.get("teachers") or {}).get("name", "—"),
                 "教室": (p.get("classrooms") or {}).get("name", "—"),
                 "授業日": p.get("lesson_date", "—"),
                 "ファイル": p.get("video_filename", "—"),
-                "ステータス": p.get("status", "—"),
+                "ステータス": STATUS_JA.get(status, status),
+                "エラー": (p.get("notes") or "")[:60] if status == "failed" else "",
             })
+        if failed_count:
+            st.error(f"❌ 解析に失敗した授業が {failed_count} 件あります。再アップロードするか管理者にご連絡ください。")
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
@@ -1697,7 +1722,7 @@ VIEWS = {
 }
 
 
-DASHBOARD_VERSION = "v2026-05-08-v9 (画面スクロール復旧+折りたたみ維持)"
+DASHBOARD_VERSION = "v2026-07-02-v10 (信頼性強化: 状態遷移・failed可視化)"
 
 
 def main():

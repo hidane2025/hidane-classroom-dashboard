@@ -495,7 +495,12 @@ def upload_lesson_video(*, file_bytes: bytes, teacher_id: str, classroom_id: str
 
 
 def fetch_pending_lessons() -> list[dict]:
-    """ヒダネ側 watcher 用: status='pending' の授業一覧"""
+    """未完了（pending / analyzing / failed）の授業一覧。
+
+    監査 2026-07-02 U#4: 旧実装は pending のみで、failed の授業が
+    どの画面からも消えて「動画が消えた」ように見えていた。
+    failed も含めて返し、UI 側でステータス別に表示する。
+    """
     client = _get_client()
     if client is None:
         return []
@@ -503,7 +508,7 @@ def fetch_pending_lessons() -> list[dict]:
         result = (
             client.table("lessons")
             .select("*, teachers(name), classrooms(name)")
-            .eq("status", "pending")
+            .in_("status", ["pending", "analyzing", "failed"])
             .order("created_at")
             .execute()
         )
