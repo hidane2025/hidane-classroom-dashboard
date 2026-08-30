@@ -4,6 +4,7 @@
 Claudeが具体的に助言する。
 """
 from __future__ import annotations
+from .models import DEFAULT_COACH_MODEL, ENV_KEY_REPORT_MODEL
 
 import os
 from dataclasses import dataclass
@@ -75,7 +76,7 @@ def ask_coach(*, teacher_name: str, question: str,
     except ImportError:
         return CoachResponse(answer="", error="anthropic package not installed")
 
-    model_name = model or os.getenv("CLAUDE_REPORT_MODEL", "claude-sonnet-4-6")
+    model_name = model or os.getenv(ENV_KEY_REPORT_MODEL, DEFAULT_COACH_MODEL)
     client = Anthropic(api_key=api_key)
 
     context = _build_context(history, checklist_avg)

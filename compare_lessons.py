@@ -3,6 +3,7 @@
 「指導前の授業」と「指導後の授業」を比較し、Claudeに成長分析レポートを書かせる。
 """
 from __future__ import annotations
+from .models import DEFAULT_COACH_MODEL, ENV_KEY_REPORT_MODEL
 
 import json
 import os
@@ -96,7 +97,7 @@ def compare(*, teacher_name: str,
     )
 
     client = Anthropic(api_key=api_key)
-    model_name = model or os.getenv("CLAUDE_REPORT_MODEL", "claude-sonnet-4-6")
+    model_name = model or os.getenv(ENV_KEY_REPORT_MODEL, DEFAULT_COACH_MODEL)
     try:
         msg = client.messages.create(
             model=model_name,

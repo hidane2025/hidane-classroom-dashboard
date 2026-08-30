@@ -67,8 +67,18 @@ except Exception:  # noqa: BLE001
 # ==========================================================
 # ページ設定
 # ==========================================================
+# レビュー是正 (2026-07-30): 旧実装は3箇所に「500MB」がベタ書きされていたが、
+# Supabase Storage の実上限は Free プランで 1ファイル 50MB（2026-07-03 実測確定）。
+# 50〜500MB のファイルは UI を素通りして Storage 側で必ず失敗し、
+# 画面には生の例外文字列しか出ないため、教室長は原因も回避策も分からなかった。
+# Pro へ上げたら Streamlit Secrets / 環境変数 STORAGE_MAX_UPLOAD_MB で引き上げる。
+# 参照: docs/長尺動画対応_ストレージ上限手順.md
+STORAGE_MAX_UPLOAD_MB = int(os.getenv("STORAGE_MAX_UPLOAD_MB", "50"))
+# 720p実測 3.9MB/分 から、その上限が何分の動画に相当するかを案内に使う
+STORAGE_MAX_MINUTES = int(STORAGE_MAX_UPLOAD_MB / 3.9)
+
 st.set_page_config(
-    page_title="HIDANE Classroom Intelligence",
+    page_title="ヒダネ 授業みまもりAI",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -287,7 +297,7 @@ def render_brand_header(subtitle: str) -> None:
         <div style='background: linear-gradient(135deg, {BRAND_DARK} 0%, {BRAND_ACCENT} 100%);
                     padding: 24px 32px; border-radius: 12px; color: white; margin-bottom: 24px;'>
           <div style='font-size: 12px; letter-spacing: 0.2em; color: {BRAND_SECONDARY};'>
-            HIDANE CLASSROOM INTELLIGENCE
+            ヒダネ 授業みまもりAI
           </div>
           <h1 style='margin: 4px 0 0 0; font-size: 28px; font-weight: 700;'>{subtitle}</h1>
           <div style='font-size: 13px; color: #cbd5e1; margin-top: 8px;'>
@@ -321,8 +331,7 @@ def kpi_card(label: str, value: str, delta: str | None = None, color: str = BRAN
 
 def render_no_data_notice():
     st.info(
-        "📭 まだデータがありません。`python run.py 動画.mkv --teacher-id ... --classroom-id ...` "
-        "で授業を解析・登録してください。"
+        "📭 まだ授業の動画がありません。「📤 動画を送る」から最初の動画をアップロードしてください。"
     )
 
 
@@ -338,7 +347,7 @@ def render_no_db_notice():
 # ==========================================================
 def view_ceo():
     """Phase C-1: 旧overall_score廃止、疑惑件数ベースの全社俯瞰へ刷新。"""
-    render_brand_header("社長ビュー — 全社俯瞰（疑惑件数ベース）")
+    render_brand_header("全教室の様子")
 
     if not _db_available():
         render_no_db_notice()
@@ -386,7 +395,7 @@ def view_ceo():
 
     cols = st.columns(4)
     with cols[0]:
-        kpi_card("今週 要確認 疑惑件数", f"{this_hm}件",
+        kpi_card("今週の確認ポイント", f"{this_hm}件",
                  f"先週比 {delta_hm:+d}件（high+medium）",
                  BRAND_PRIMARY if this_hm > 0 else "#16A34A")
     with cols[1]:
@@ -396,19 +405,19 @@ def view_ceo():
             req_1on1 = int((per_teacher >= 3).sum())
         else:
             req_1on1 = 0
-        kpi_card("要1on1 講師数", f"{req_1on1}", "high疑惑3件以上", BRAND_SECONDARY)
+        kpi_card("要1on1 講師数", f"{req_1on1}", "重要な場面が3件以上", BRAND_SECONDARY)
     with cols[2]:
         active_rooms = this_df["classroom_id"].nunique()
         kpi_card("稼働教室数", f"{active_rooms}", "今週授業あり", BRAND_ACCENT)
     with cols[3]:
         lesson_count = len(this_df)
-        sub = f"うち{pending_count}本 解析待ち" if pending_count > 0 else ""
+        sub = f"うち{pending_count}本 順番待ち" if pending_count > 0 else ""
         kpi_card("今週の授業本数", f"{lesson_count}", sub, "#64748b")
 
     st.markdown("---")
 
     # 教室×週 ヒートマップ（疑惑件数 high+medium）
-    st.subheader("📊 教室×週次 疑惑件数ヒートマップ（high + medium）")
+    st.subheader("📊 教室ごとの確認ポイント数（週ごと）")
     completed_for_heat = df[completed_mask].copy()
     if not completed_for_heat.empty:
         completed_for_heat["hm_count"] = (
@@ -437,7 +446,7 @@ def view_ceo():
     # トップ/ワースト（疑惑件数ベース）
     col_top, col_worst = st.columns(2)
     with col_top:
-        st.subheader("🏆 今週のトップ5（疑惑が少ない講師）")
+        st.subheader("🏆 今週のトップ5（確認ポイントが少ない講師）")
         if not this_completed.empty:
             top_df = (
                 this_completed.assign(hm_count=lambda d: d["high_count"] + d["medium_count"])
@@ -448,14 +457,14 @@ def view_ceo():
                 .head(5)
                 .reset_index()
             )
-            top_df.columns = ["講師", "平均疑惑件数"]
+            top_df.columns = ["講師", "確認ポイントの平均"]
             top_df["平均疑惑件数"] = top_df["平均疑惑件数"].round(1)
             st.dataframe(top_df, use_container_width=True, hide_index=True)
         else:
             st.caption("（データなし）")
 
     with col_worst:
-        st.subheader("⚠️ 今週の要介入5名（疑惑件数 多い順）")
+        st.subheader("⚠️ 今週 気にかけたい講師（確認ポイントが多い順）")
         if not this_completed.empty:
             worst_df = (
                 this_completed.assign(hm_count=lambda d: d["high_count"] + d["medium_count"])
@@ -481,7 +490,14 @@ def view_ceo():
     else:
         display_cols = ["triggered_at", "severity", "teacher_name", "kind", "message"]
         display_cols = [c for c in display_cols if c in alerts_df.columns]
-        st.dataframe(alerts_df[display_cols], use_container_width=True, hide_index=True)
+        # 英語の列名を画面に出さない（100人ルール 2026-08-24）
+        col_ja = {"triggered_at": "日時", "severity": "重要度",
+                  "teacher_name": "講師", "kind": "種類", "message": "内容"}
+        view_df = alerts_df[display_cols].rename(columns=col_ja)
+        if "重要度" in view_df.columns:
+            view_df["重要度"] = view_df["重要度"].map(
+                {"critical": "重要", "warning": "注意", "info": "参考"}).fillna(view_df["重要度"])
+        st.dataframe(view_df, use_container_width=True, hide_index=True)
 
 
 # ==========================================================
@@ -489,7 +505,7 @@ def view_ceo():
 # ==========================================================
 def view_manager():
     """Phase C-1: 旧overall_scoreを廃止、自教室の講師ごと疑惑件数推移を表示。"""
-    render_brand_header("教室長ビュー — 自教室の講師管理（疑惑件数ベース）")
+    render_brand_header("うちの教室 — 講師ごとの様子")
 
     if not _db_available():
         render_no_db_notice()
@@ -542,11 +558,11 @@ def view_manager():
         .sort_values("平均疑惑件数", ascending=True)  # 少ない順
         .reset_index()
     )
-    summary["要1on1"] = summary["high合計"].apply(lambda s: "⚠️" if s >= 3 else "")
+    summary["面談おすすめ"] = summary["high合計"].apply(lambda s: "⚠️" if s >= 3 else "")
 
-    st.subheader(f"📋 {selected_name} 講師一覧（直近4週・疑惑件数）")
+    st.subheader(f"📋 {selected_name} の講師一覧（直近4週の確認ポイント）")
     st.dataframe(summary, use_container_width=True, hide_index=True)
-    st.caption("※ 「平均疑惑件数」= high+medium 合計の授業平均 / 「要1on1」= 期間内 high合計 ≥ 3")
+    st.caption("※ 「確認ポイントの平均」= 1授業あたりの重要・注意の数 / 「面談おすすめ」= 重要な場面が3回以上あった講師")
 
     # 講師選択→時系列
     teachers = summary["teacher_name"].tolist()
@@ -558,7 +574,7 @@ def view_manager():
 
         col1, col2 = st.columns([2, 1])
         with col1:
-            st.subheader(f"📈 {selected_teacher} — 疑惑件数推移")
+            st.subheader(f"📈 {selected_teacher} — 確認ポイントの推移")
             plot_df = teacher_df.copy()
             plot_df["high+medium"] = plot_df["high_count"] + plot_df["medium_count"]
             fig = px.line(
@@ -582,7 +598,7 @@ def view_manager():
             med_n = int(latest.get("medium_count", 0) or 0)
             audio_n = int(latest.get("audio_count", 0) or 0)
             st.metric(
-                "最新授業の疑惑件数",
+                "最新授業の確認ポイント",
                 f"{high_n + med_n}件",
                 f"🔴 high {high_n} / 🟡 medium {med_n}",
             )
@@ -656,14 +672,14 @@ def view_manager():
 def _teacher_deprecation_notice():
     st.warning(
         "📢 **AI採点機能は廃止しました**（2026-05-07）。"
-        "AIは「疑惑タグ」を抽出し、教室長が動画で判断する運用です。"
-        "ご自身の授業の詳細は **🎥 授業詳細（疑惑タグ）** からご確認ください。"
+        "AIの仕事は「見るべき場面を選ぶこと」だけです。評価や判断はしません。"
+        "くわしくは **🎬 授業を見る** からご確認ください。"
     )
 
 
 def view_teacher():
     """Phase C-1: 旧overall_score廃止、自分の疑惑件数推移と AI コーチ対話を表示。"""
-    render_brand_header("講師ビュー — 自分の成長記録（疑惑件数ベース）")
+    render_brand_header("わたしの授業 — ふり返り")
 
     if not _db_available():
         render_no_db_notice()
@@ -708,7 +724,7 @@ def view_teacher():
     cols = st.columns(3)
     with cols[0]:
         kpi_card(
-            "最新授業の疑惑件数",
+            "最新授業の確認ポイント",
             f"{latest_hm}件",
             f"前回比 {delta:+d}件" if prev is not None else "",
             BRAND_PRIMARY if latest_hm > 0 else "#16A34A",
@@ -727,7 +743,7 @@ def view_teacher():
 
     col1, col2 = st.columns([2, 1])
     with col1:
-        st.subheader("📈 あなたの疑惑件数推移")
+        st.subheader("📈 あなたの確認ポイントの推移")
         fig = px.line(
             hist_df,
             x="lesson_date", y=["high_count", "medium_count", "low_count"],
@@ -754,7 +770,7 @@ def view_teacher():
     st.subheader("💬 AIコーチに相談する")
     q = st.text_area(
         "聞きたいこと",
-        placeholder="例: 私の最新授業で疑惑が多かった理由を教えて",
+        placeholder="例: 私の最新の授業で確認ポイントが多かった理由を教えて",
         key="coach_question",
     )
     if st.button("相談する", type="primary"):
@@ -780,7 +796,7 @@ def view_teacher():
 # ビュー: 管理（マスタ登録）
 # ==========================================================
 def view_admin():
-    render_brand_header("管理 — 講師・教室マスタ")
+    render_brand_header("設定 — 教室と講師の登録")
 
     if not _db_available():
         render_no_db_notice()
@@ -794,7 +810,7 @@ def view_admin():
         else:
             st.error(flash["msg"])
 
-    tab1, tab2, tab3 = st.tabs(["教室マスタ", "講師マスタ", "授業履歴"])
+    tab1, tab2, tab3 = st.tabs(["教室の登録", "講師の登録", "授業のきろく"])
 
     # ====== 教室マスタ ======
     with tab1:
@@ -858,12 +874,12 @@ def view_admin():
                 })
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         else:
-            st.info("講師が未登録です。下のフォームから追加してください。")
+            st.info("講師がまだ登録されていません。下のフォームから追加してください。")
 
         st.markdown("#### ➕ 講師を追加")
         all_rooms = fetch_all_classrooms()
         if not all_rooms:
-            st.warning("先に教室マスタを登録してください。")
+            st.warning("先に教室を登録してください。")
         else:
             room_map = {r["name"]: r["id"] for r in all_rooms}
             with st.form("add_teacher", clear_on_submit=True):
@@ -953,7 +969,7 @@ AUDIO_KINDS = {"no_greeting", "repeat_phrase", "slow_tempo",
 
 
 def view_lesson_detail():
-    render_brand_header("授業詳細 — 動画プレーヤー＋AI判定")
+    render_brand_header("授業を見る — AIが選んだ確認ポイント")
 
     if not _db_available():
         render_no_db_notice()
@@ -1073,17 +1089,17 @@ def view_lesson_detail():
     with cols[0]:
         # 📹 Vision確認 件数（最優先指標）
         kpi_card(
-            "📹 Vision確認",
+            "📹 まず見る場面",
             f"{vision_ok_hdr}件",
-            "教室長が必ず動画で確認",
+            "AIが映像で確かめた場面",
             BRAND_PRIMARY if vision_ok_hdr > 0 else "#94a3b8",
         )
     with cols[1]:
         # 🎤 音声疑惑 件数（次点指標）
         kpi_card(
-            "🎤 音声疑惑",
+            "🎤 会話から",
             f"{audio_hdr}件",
-            "文字起こしから抽出",
+            "会話の内容から見つけた場面",
             BRAND_SECONDARY if audio_hdr > 0 else "#94a3b8",
         )
     with cols[2]:
@@ -1095,7 +1111,7 @@ def view_lesson_detail():
         )
     with cols[3]:
         dur = lesson.get("video_duration_sec") or 0
-        kpi_card("動画尺", f"{dur//60}分{dur%60}秒", lesson.get("lesson_date", "")[:10], "#64748b")
+        kpi_card("動画の長さ", f"{dur//60}分{dur%60}秒", lesson.get("lesson_date", "")[:10], "#64748b")
 
     st.markdown("---")
 
@@ -1122,23 +1138,23 @@ def view_lesson_detail():
             )
 
     with col_e:
-        st.subheader("🚨 疑惑タグ一覧（教室長レビュー用）")
+        st.subheader("📌 確認ポイント（押すとその場面に飛べます）")
         # 監査 2026-07-02 U#1: 未解析（pending/analyzing/failed）の授業を
         # 「疑惑0件=問題なし」と誤読させないため、status を先に分岐する。
         lesson_status = lesson.get("status", "")
         if lesson_status == "pending":
-            st.info("⏳ この授業は**解析待ち**です。ワーカーが自動で解析を開始します（通常10分以内）。")
+            st.info("⏳ この動画は**順番待ち**です。自動で確認が始まります（ふつう10分以内）。")
         elif lesson_status == "analyzing":
-            st.info("🔄 この授業は**解析中**です。完了まで数分お待ちください（画面を再読み込みすると更新されます）。")
+            st.info("🔄 いまAIがこの動画を確認しています。数分お待ちください（画面を開き直すと進みます）。")
         elif lesson_status == "failed":
             st.error(
-                "❌ この授業の解析は**失敗**しました。\n\n"
+                "❌ この動画の確認は**エラーになりました**。\n\n"
                 f"エラー内容: {lesson.get('notes') or '（記録なし）'}\n\n"
-                "お手数ですが「📤 動画投入」から再アップロードするか、管理者にご連絡ください。"
+                "お手数ですが「📤 動画を送る」からもう一度アップロードするか、ヒダネにご連絡ください。"
             )
         elif not events:
-            st.success("✅ 疑惑タグは0件（AIは何も検知しませんでした）")
-            st.caption("※ 動画解析が完了済みで0件の場合、特に問題行動・要確認シーンはありません。")
+            st.success("✅ 確認ポイントはありません（AIは気になる場面を見つけませんでした）")
+            st.caption("※ AIの確認が終わって0件なら、気になる場面は見つからなかったということです。")
         else:
             # 3層に分類（中野さん指示「vision判定の方が優先してください」2026-05-07）:
             #   Tier1 📹✅ Vision確認済み映像（最優先・教室長が必ず動画で確認すべき）
@@ -1168,10 +1184,10 @@ def view_lesson_detail():
                 f"📊 計 **{len(events)}件** ｜ 🔴high {high_count} / 🟡medium {med_count} / ⚪low {low_count}"
             )
             st.caption(
-                f"📹 Vision確認 **{len(tier1_vision_ok)}件** / 🎤 音声疑惑 **{len(tier2_audio)}件** "
-                f"／ ⚪ Vision評価で問題なし {len(tier3_vision_ng)}件"
+                f"📹 まず見る場面 **{len(tier1_vision_ok)}件** / 🎤 会話から **{len(tier2_audio)}件** "
+                f"／ ⚪ 問題なし {len(tier3_vision_ng)}件"
             )
-            st.caption("各タグの「▶ 再生」で該当シーンへジャンプ → 教室長が動画を見て最終判断")
+            st.caption("「▶ 再生」を押すとその場面に飛びます。よい・わるいの判断は、動画を見てご自身でお願いします。")
 
             sev_order = {"high": 0, "medium": 1, "low": 2}
 
@@ -1226,7 +1242,7 @@ def view_lesson_detail():
                             if desc:
                                 st.markdown(f"**説明**: {desc}")
                             if expl and expl != desc:
-                                quote_label = "📝 抜粋" if kind_local in AUDIO_KINDS else "👁 Vision所見"
+                                quote_label = "📝 抜粋" if kind_local in AUDIO_KINDS else "👁 AIが見た内容"
                                 st.markdown(f"**{quote_label}**: 「{expl}」")
                     st.markdown(
                         f"<div style='height:2px;background:{color};margin-bottom:8px;opacity:{0.4 if dimmed else 1};'></div>",
@@ -1238,40 +1254,40 @@ def view_lesson_detail():
             if tier1_vision_ok:
                 hm = [e for e in tier1_vision_ok if e.get("severity") in ("high", "medium")]
                 lo = [e for e in tier1_vision_ok if e.get("severity") == "low"]
-                st.markdown(f"### 📹✅ Vision確認済み映像 — 最優先")
+                st.markdown(f"### 📹 まず見る場面（AIが映像で確かめ済み）")
                 if hm:
-                    st.caption(f"重大度 high/medium のみ {len(hm)}件を表示（教室長は必ず再生確認）")
+                    st.caption(f"重要・注意の {len(hm)}件を表示しています（▶ 再生で動画をご確認ください）")
                     for ev in _sort_within_tier(hm):
-                        _render_event_card(ev, tier_label="📹✅Vision")
+                        _render_event_card(ev, tier_label="📹映像で確認済み")
                 else:
-                    st.caption("⚠️ 重大度 high/medium の Vision確認イベントはありません")
+                    st.caption("重要・注意にあたる場面はありません")
                 if lo:
-                    with st.expander(f"📹✅ low severity の Vision確認 {len(lo)}件（軽微・参考）", expanded=False):
+                    with st.expander(f"📹 軽めの場面 {len(lo)}件（参考）", expanded=False):
                         for ev in _sort_within_tier(lo):
-                            _render_event_card(ev, tier_label="📹✅Vision(low)")
+                            _render_event_card(ev, tier_label="📹映像で確認済み・軽め")
 
             # ---- Tier 2: 音声疑惑 ----
             if tier2_audio:
-                st.markdown(f"### 🎤 音声疑惑タグ（{len(tier2_audio)}件）")
+                st.markdown(f"### 🎤 会話から見つけた確認ポイント（{len(tier2_audio)}件）")
                 for ev in _sort_within_tier(tier2_audio):
                     _render_event_card(ev, tier_label="🎤音声")
 
             # ---- Tier-other: Vision未判定の映像 ----
             if tier_other:
-                st.markdown(f"### 📹? Vision未判定の映像系（{len(tier_other)}件）")
+                st.markdown(f"### 📹 参考: AIがまだ確かめていない検出（{len(tier_other)}件）")
                 for ev in _sort_within_tier(tier_other):
-                    _render_event_card(ev, tier_label="📹?Vision")
+                    _render_event_card(ev, tier_label="📹AI未確認")
 
             # ---- Tier 3: Vision却下 (折りたたみ) ----
             if tier3_vision_ng:
-                with st.expander(f"⚪ Vision評価で問題なしと判定（{len(tier3_vision_ng)}件・参考）", expanded=False):
-                    st.caption("Visionが「明らかに勉強中・問題なし」と判断したシーン。念のため参考表示。")
+                with st.expander(f"⚪ 参考: AIが「問題なし」と判断した場面（{len(tier3_vision_ng)}件）", expanded=False):
+                    st.caption("AIが映像を見て「ふつうに勉強している」と判断した場面です。念のため残してあります。")
                     for ev in _sort_within_tier(tier3_vision_ng):
-                        _render_event_card(ev, tier_label="⚪Vision却下", dimmed=True)
+                        _render_event_card(ev, tier_label="⚪問題なし", dimmed=True)
 
     # AI講評（教室長レビュー誘導文）
     st.markdown("---")
-    st.subheader("🤖 AI講評（教室長レビュー誘導）")
+    st.subheader("🤖 AIのまとめ")
     if lesson.get("ai_commentary"):
         st.info(lesson["ai_commentary"])
     else:
@@ -1311,7 +1327,7 @@ def render_subject_badge(lesson: dict) -> None:
         conf_value = 0.0
 
     if conf_value < 0.6:
-        st.warning("判定不可（信頼度が基準値 60% に達しませんでした）")
+        st.warning("AIでは判断できませんでした（自信が足りません）")
         if subject_ai or subject_topic:
             st.caption(f"参考: {subject_ai or '—'} / {subject_topic or '—'}")
         return
@@ -1376,7 +1392,7 @@ def render_checklist_two_blocks(cs_df: pd.DataFrame, lesson_id: str) -> None:
     skipped = cs_df[cs_df["status"] == "skipped"]
 
     # ====== ブロック1: scored ======
-    st.markdown(f"#### ✅ AIが自信を持って判定した項目（{len(scored)}項目）")
+    st.markdown(f"#### ✅ AIが判断できた項目（{len(scored)}項目）")
     if scored.empty:
         st.info("AIが信頼度を持って採点できた項目はありませんでした。下の手動評価欄をご利用ください。")
     else:
@@ -1425,12 +1441,12 @@ def render_checklist_two_blocks(cs_df: pd.DataFrame, lesson_id: str) -> None:
     st.markdown("---")
     st.markdown(f"#### 👁 教室長の目視確認推奨（{len(skipped)}項目）")
     st.caption(
-        "※ AIで判定するには情報量が足りない項目です。"
+        "※ AIには材料が足りない項目です。動画でご確認ください。"
         "教室長が動画を観て直接ご評価ください。"
     )
 
     if skipped.empty:
-        st.success("目視確認が必要な項目はありません（全項目をAIが判定できました）。")
+        st.success("動画での確認が必要な項目はありません。")
         return
 
     for _, r in skipped.iterrows():
@@ -1479,8 +1495,8 @@ def render_timeline_view(lesson_id: str, lesson: dict) -> None:
     if not raw_events:
         st.info(
             "⏳ この授業にはまだタイムラインデータがありません。\n\n"
-            "新しい解析（Ver.3以降）から自動で生成されます。"
-            "既存授業に反映したい場合は、ステータスを `pending` に戻して再解析してください。"
+            "新しく送った動画から自動で作られます。"
+            "すでに送った動画に反映したい場合は、ヒダネにご連絡ください。"
         )
         return
 
@@ -1607,21 +1623,21 @@ def render_timeline_view(lesson_id: str, lesson: dict) -> None:
 # ビュー: 動画投入（クライアントセルフサービス）
 # ==========================================================
 def view_upload():
-    render_brand_header("📤 動画投入 — 授業録画のアップロード")
+    render_brand_header("📤 動画を送る — 授業の録画をアップロード")
 
     if not _db_available():
         render_no_db_notice()
         return
 
     st.info(
-        "授業録画（mkv / mp4 ・ 500MB以下）をアップロードすると、"
-        "ヒダネ側の解析ワーカーが自動で拾って AI 採点します（通常5〜15分）。"
+        f"授業録画（mkv / mp4 ・{STORAGE_MAX_UPLOAD_MB}MB以下＝720pで約{STORAGE_MAX_MINUTES}分まで）"
+        "をアップロードすると、AIが自動で中身を確認します（ふつう5〜15分）。"
     )
 
     classrooms = fetch_all_classrooms()
     teachers = fetch_all_teachers()
     if not classrooms or not teachers:
-        st.warning("教室または講師マスタが未登録です。先に「⚙️ 管理」タブで確認してください。")
+        st.warning("教室または講師が未登録です。先に「⚙️ 設定」で登録してください。")
         return
 
     room_map = {c["name"]: c["id"] for c in classrooms}
@@ -1640,20 +1656,25 @@ def view_upload():
         notes = st.text_area("メモ（教室長のコメント等）", placeholder="任意")
 
         uploaded_file = st.file_uploader(
-            "授業動画（mkv / mp4 ・最大500MB）",
+            f"授業動画（mkv / mp4 ・最大{STORAGE_MAX_UPLOAD_MB}MB）",
             type=["mkv", "mp4", "mov", "avi"],
             accept_multiple_files=False,
         )
 
-        submitted = st.form_submit_button("🚀 解析キューに投入", type="primary")
+        submitted = st.form_submit_button("🚀 この動画をAIに見てもらう", type="primary")
 
     if submitted:
         if not uploaded_file:
             st.warning("動画ファイルを選択してください")
             return
         size_mb = uploaded_file.size / (1024 * 1024)
-        if size_mb > 500:
-            st.error(f"ファイルが大きすぎます（{size_mb:.1f}MB > 500MB）。圧縮してから再試行してください。")
+        if size_mb > STORAGE_MAX_UPLOAD_MB:
+            st.error(
+                f"ファイルが大きすぎます（{size_mb:.1f}MB > {STORAGE_MAX_UPLOAD_MB}MB）。\n\n"
+                f"**対処**: 動画を約{STORAGE_MAX_MINUTES}分以内に分割してから、"
+                "1本ずつアップロードしてください（分けた動画はそれぞれ別の授業として扱われます）。\n\n"
+                "長い授業をそのまま送りたい場合は、ヒダネにご相談ください（保存できる容量を増やす必要があります）。"
+            )
             return
 
         with st.spinner(f"Supabase Storage にアップロード中（{size_mb:.1f}MB）…"):
@@ -1674,21 +1695,21 @@ def view_upload():
         else:
             st.success(
                 f"✅ アップロード完了！lesson_id: `{result['lesson_id']}`\n\n"
-                f"ステータス: **解析待ち (pending)**\n\n"
-                "ヒダネ解析ワーカーが数分以内に拾って採点を開始します。"
-                "完了後「🎥 授業詳細」ビューでスコアとレポートが表示されます。"
+                f"状態: **順番待ち**\n\n"
+                "数分以内にAIが確認を始めます。"
+                "終わったら「🎬 授業を見る」に確認ポイントが表示されます。"
             )
             st.video(result["storage_url"], start_time=0)
 
     # 解析待ち一覧
     st.markdown("---")
-    st.subheader("⏳ 未完了の授業一覧（解析待ち・解析中・失敗）")
+    st.subheader("⏳ まだ終わっていない動画（順番待ち・確認中・エラー）")
     pending = fetch_pending_lessons()
     if not pending:
-        st.caption("未完了の授業はありません（全て解析済みです）。")
+        st.caption("すべての動画の確認が終わっています。")
     else:
         # 監査 2026-07-02 U#4: failed をここに可視化（以前は画面から消えていた）
-        STATUS_JA = {"pending": "⏳ 解析待ち", "analyzing": "🔄 解析中", "failed": "❌ 失敗"}
+        STATUS_JA = {"pending": "⏳ 順番待ち", "analyzing": "🔄 AIが確認中", "failed": "❌ エラー"}
         rows = []
         failed_count = 0
         for p in pending:
@@ -1696,16 +1717,16 @@ def view_upload():
             if status == "failed":
                 failed_count += 1
             rows.append({
-                "投入日時": p.get("created_at", "—")[:19].replace("T", " "),
+                "送った日時": p.get("created_at", "—")[:19].replace("T", " "),
                 "講師": (p.get("teachers") or {}).get("name", "—"),
                 "教室": (p.get("classrooms") or {}).get("name", "—"),
                 "授業日": p.get("lesson_date", "—"),
                 "ファイル": p.get("video_filename", "—"),
-                "ステータス": STATUS_JA.get(status, status),
+                "状態": STATUS_JA.get(status, status),
                 "エラー": (p.get("notes") or "")[:60] if status == "failed" else "",
             })
         if failed_count:
-            st.error(f"❌ 解析に失敗した授業が {failed_count} 件あります。再アップロードするか管理者にご連絡ください。")
+            st.error(f"❌ エラーになった動画が {failed_count} 件あります。もう一度アップロードするか、ヒダネにご連絡ください。")
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
@@ -1713,12 +1734,12 @@ def view_upload():
 # メイン
 # ==========================================================
 VIEWS = {
-    "🎥 授業詳細（疑惑タグ）": view_lesson_detail,
-    "📤 動画投入": view_upload,
-    "🏢 社長ビュー": view_ceo,
-    "👥 教室長ビュー": view_manager,
-    "👤 講師ビュー": view_teacher,
-    "⚙️ 管理": view_admin,
+    "🎬 授業を見る": view_lesson_detail,
+    "📤 動画を送る": view_upload,
+    "🏫 全教室の様子": view_ceo,
+    "👥 うちの教室": view_manager,
+    "👤 わたしの授業": view_teacher,
+    "⚙️ 設定": view_admin,
 }
 
 
@@ -1728,11 +1749,11 @@ DASHBOARD_VERSION = "v2026-07-02-v10 (信頼性強化: 状態遷移・failed可�
 def main():
     with st.sidebar:
         st.markdown(
-            f"<div style='color: {BRAND_SECONDARY}; font-size: 11px; letter-spacing: 0.2em;'>HIDANE CI</div>",
+            f"<div style='color: {BRAND_SECONDARY}; font-size: 11px; letter-spacing: 0.2em;'>ヒダネ 授業みまもりAI</div>",
             unsafe_allow_html=True,
         )
         st.markdown("## 🎓 授業品質管理")
-        view_name = st.radio("ビューを選択", list(VIEWS.keys()))
+        view_name = st.radio("メニュー", list(VIEWS.keys()))
         st.markdown("---")
         # 🔖 バージョンスタンプ（新コード反映確認用）
         st.markdown(
