@@ -964,6 +964,31 @@ KIND_LABELS_V = {
     "long_silence_speech": "長い沈黙（音声）",
 }
 SEV_COLORS_V = {"low": "#64748b", "medium": "#F28C28", "high": "#C41E24"}
+# 重要度を日本語1語で（画面のどこでも同じ言葉を使う）
+SEV_WORDS_V = {"high": "🔴 重要", "medium": "🟡 注意", "low": "⚪ 軽め"}
+
+
+def clean_description(desc: str, label: str) -> str:
+    """説明文の先頭にくっついている「絵文字＋タグ名」を落とす。
+
+    2026-09-02 本番画面で発覚した2つの見え方の問題を、既存データのまま直すための処理:
+      ・カードは種類名をすでに出しているのに、説明文の先頭にも同じ名前があり
+        「🔁 繰り返し発話 / 🔴 繰り返し発話 「終わらない」が…」と二重に出ていた
+      ・その先頭の絵文字は**タグ名の一部**（プロンプトで「🟡 挨拶不在」と定義）
+        なのに、画面では🔴🟡⚪を重要度（重要/注意/軽め）にも使っている。
+        結果、重要度が「軽め」の項目に🟡が付き、見出しの集計（注意1件）と
+        カードの見え方（🟡が5件）が食い違っていた。
+    保存側では説明文にラベルを入れないよう直したが、既に保存済みの授業は
+    直らないため、表示のときにも落とす。
+    """
+    out = (desc or "").strip()
+    for mark in ("🔴", "🟡", "⚪", "🟠", "🔵"):
+        if out.startswith(mark):
+            out = out[len(mark):].lstrip()
+    if label and out.startswith(label):
+        out = out[len(label):].lstrip("　 :：")
+    return out
+
 
 # 疑惑タグの分類（映像系 vs 音声系）
 VISUAL_KINDS = {"phone_use", "sleeping", "head_down", "excessive_motion",
@@ -1233,6 +1258,8 @@ def view_lesson_detail():
                 expl = ev.get("vision_explanation") or ""
                 kind_local = ev.get("kind", "")
                 # 一行サマリ（40文字に切り詰め）
+                desc = clean_description(desc, label)
+                sev_word = SEV_WORDS_V.get(ev.get("severity"), "")
                 summary_src = (desc or expl or "").strip()
                 summary = summary_src[:40] + ("…" if len(summary_src) > 40 else "")
                 has_more = len(desc) > 40 or (expl and expl != desc and len(expl) > 0)
@@ -1243,7 +1270,8 @@ def view_lesson_detail():
                         st.markdown(f"**{mmss}**")
                         st.caption(tier_label)
                     with c2:
-                        title_md = f"{icon} **{label}**"
+                        # 重要度は severity 列だけを根拠にする（説明文の絵文字は使わない）
+                        title_md = f"{icon} **{label}**" + (f"　{sev_word}" if sev_word else "")
                         if dimmed:
                             title_md = f"<span style='opacity:0.55'>{title_md}</span>"
                             st.markdown(title_md, unsafe_allow_html=True)
@@ -1260,7 +1288,7 @@ def view_lesson_detail():
                     if has_more:
                         with st.expander("📄 詳細を表示", expanded=False):
                             if desc:
-                                st.markdown(f"**説明**: {desc}")
+                                st.markdown(f"**説明**: {desc}")  # clean_description 済み
                             if expl and expl != desc:
                                 quote_label = "📝 抜粋" if kind_local in AUDIO_KINDS else "👁 AIが見た内容"
                                 st.markdown(f"**{quote_label}**: 「{expl}」")
