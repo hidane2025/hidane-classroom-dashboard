@@ -335,14 +335,14 @@ def kpi_card(label: str, value: str, delta: str | None = None, color: str = BRAN
 
 def render_no_data_notice():
     st.info(
-        "📭 まだ授業の動画がありません。「📤 動画を送る」から最初の動画をアップロードしてください。"
+        "📭 まだ授業の動画がありません。「📤 動画を送る」から最初の動画を送ってください。"
     )
 
 
 def render_no_db_notice():
     st.warning(
-        "⚠️ Supabase 未接続。`.env` に `SUPABASE_URL` と `SUPABASE_KEY` を設定してください。\n"
-        "Phase 1の単発レポート（`output/*.html`）はDBなしでも動作します。"
+        "⚠️ データの置き場所につながっていません。しばらく待ってから画面を開き直してください。"
+        "直らない場合はヒダネにご連絡ください。"
     )
 
 
@@ -660,7 +660,7 @@ def view_manager():
                     else:
                         cols = st.columns(3)
                         with cols[0]:
-                            st.metric("成長度スコア", f"{result.growth_score}/100")
+                            st.metric("前より良くなった度合い", f"{result.growth_score}/100")
                         with cols[1]:
                             st.metric("最も伸びた項目", result.biggest_improvement)
                         with cols[2]:
@@ -1140,7 +1140,7 @@ def view_lesson_detail():
         else:
             st.info(
                 "📹 この授業の動画はまだ登録されていません。"
-                "「📤 動画を送る」からアップロードすると、ここで再生できるようになります。"
+                "「📤 動画を送る」から送ると、ここで再生できるようになります。"
             )
 
     with col_e:
@@ -1156,7 +1156,7 @@ def view_lesson_detail():
             st.error(
                 "❌ この動画の確認は**エラーになりました**。\n\n"
                 f"エラー内容: {lesson.get('notes') or '（記録なし）'}\n\n"
-                "お手数ですが「📤 動画を送る」からもう一度アップロードするか、ヒダネにご連絡ください。"
+                "お手数ですが「📤 動画を送る」からもう一度送るか、ヒダネにご連絡ください。"
             )
         elif not events:
             st.success("✅ 確認ポイントはありません（AIは気になる場面を見つけませんでした）")
@@ -1450,7 +1450,7 @@ def render_checklist_two_blocks(cs_df: pd.DataFrame, lesson_id: str) -> None:
     # ====== ブロック1: scored ======
     st.markdown(f"#### ✅ AIが判断できた項目（{len(scored)}項目）")
     if scored.empty:
-        st.info("AIが信頼度を持って採点できた項目はありませんでした。下の手動評価欄をご利用ください。")
+        st.info("AIが判断できた項目はありませんでした。下の欄でご自身の評価を入力できます。")
     else:
         # レーダーチャート（scored のみ）
         fig = go.Figure()
@@ -1522,7 +1522,7 @@ def render_checklist_two_blocks(cs_df: pd.DataFrame, lesson_id: str) -> None:
             )
         with c2:
             st.text_area(
-                "コメント（任意）",
+                "メモ（任意）",
                 key=f"manual_note_{lesson_id}_{item_id}",
                 height=80,
                 placeholder="どんな様子だったか、記憶に残った場面など",
@@ -1546,7 +1546,7 @@ def render_timeline_view(lesson_id: str, lesson: dict) -> None:
         raw_events = []
 
     st.markdown("---")
-    st.subheader("🕒 12項目タイムライン — スコアの根拠を秒数で")
+    st.subheader("🕒 12項目 — その判断のもとになった場面（秒数つき）")
 
     if not raw_events:
         st.info(
@@ -1686,8 +1686,10 @@ def view_upload():
         return
 
     st.info(
-        f"授業録画（mkv / mp4 ・{STORAGE_MAX_UPLOAD_MB}MB以下＝720pで約{STORAGE_MAX_MINUTES}分まで）"
-        "をアップロードすると、AIが自動で中身を確認します（ふつう5〜15分）。"
+        "授業の録画を送ると、AIが自動で中身を確認します（ふつう5〜15分）。\n\n"
+        f"送れるのは **mkv か mp4** で、1本 **{STORAGE_MAX_UPLOAD_MB}MB まで**"
+        f"（ふつうの画質でおよそ **{STORAGE_MAX_MINUTES}分ぶん**）。\n\n"
+        "これより長い授業は、下の説明のとおり分けて送ってください。"
     )
 
     classrooms = fetch_all_classrooms()
@@ -1709,7 +1711,7 @@ def view_upload():
             subject = st.text_input("科目", placeholder="例: 数学A / 英語")
             grade = st.text_input("学年", placeholder="例: 中1 / 中3")
             student_count = st.number_input("出席生徒数", min_value=0, max_value=50, value=20)
-        notes = st.text_area("メモ（教室長のコメント等）", placeholder="任意")
+        notes = st.text_area("メモ（教室長の気づきなど・任意）", placeholder="任意")
 
         uploaded_file = st.file_uploader(
             f"授業動画（mkv / mp4 ・最大{STORAGE_MAX_UPLOAD_MB}MB）",
@@ -1721,19 +1723,20 @@ def view_upload():
 
     if submitted:
         if not uploaded_file:
-            st.warning("動画ファイルを選択してください")
+            st.warning("動画のファイルを選んでください。")
             return
         size_mb = uploaded_file.size / (1024 * 1024)
         if size_mb > STORAGE_MAX_UPLOAD_MB:
             st.error(
-                f"ファイルが大きすぎます（{size_mb:.1f}MB > {STORAGE_MAX_UPLOAD_MB}MB）。\n\n"
-                f"**対処**: 動画を約{STORAGE_MAX_MINUTES}分以内に分割してから、"
-                "1本ずつアップロードしてください（分けた動画はそれぞれ別の授業として扱われます）。\n\n"
-                "長い授業をそのまま送りたい場合は、ヒダネにご相談ください（保存できる容量を増やす必要があります）。"
+                f"この動画は大きすぎます（{size_mb:.1f}MB）。"
+                f"1本 {STORAGE_MAX_UPLOAD_MB}MB までしか送れません。\n\n"
+                f"**やること**: 動画を{STORAGE_MAX_MINUTES}分くらいずつに分けて、"
+                "1本ずつ送ってください（分けた動画は、それぞれ別の授業として扱われます）。\n\n"
+                "長い授業をそのまま送りたい場合は、ヒダネにご相談ください。"
             )
             return
 
-        with st.spinner(f"Supabase Storage にアップロード中（{size_mb:.1f}MB）…"):
+        with st.spinner(f"動画を送っています（{size_mb:.1f}MB）…"):
             result = upload_lesson_video(
                 file_bytes=uploaded_file.getvalue(),
                 teacher_id=teacher_map[teacher_name],
@@ -1750,10 +1753,9 @@ def view_upload():
             st.error("動画を送れませんでした。ファイルの大きさと形式（mkv / mp4）をご確認のうえ、もう一度お試しください。直らない場合はヒダネにご連絡ください。")
         else:
             st.success(
-                f"✅ アップロード完了！lesson_id: `{result['lesson_id']}`\n\n"
-                f"状態: **順番待ち**\n\n"
+                "✅ 動画を送りました。いまは**順番待ち**です。\n\n"
                 "数分以内にAIが確認を始めます。"
-                "終わったら「🎬 授業を見る」に確認ポイントが表示されます。"
+                "終わったら「🎬 授業を見る」に確認ポイントが出ます。"
             )
             st.video(result["storage_url"], start_time=0)
 
