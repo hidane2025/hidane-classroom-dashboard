@@ -4,7 +4,7 @@
 Claudeが具体的に助言する。
 """
 from __future__ import annotations
-from .models import DEFAULT_COACH_MODEL, ENV_KEY_REPORT_MODEL
+from models import DEFAULT_COACH_MODEL, ENV_KEY_REPORT_MODEL
 
 import os
 from dataclasses import dataclass

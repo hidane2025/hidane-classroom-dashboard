@@ -3,7 +3,7 @@
 「指導前の授業」と「指導後の授業」を比較し、Claudeに成長分析レポートを書かせる。
 """
 from __future__ import annotations
-from .models import DEFAULT_COACH_MODEL, ENV_KEY_REPORT_MODEL
+from models import DEFAULT_COACH_MODEL, ENV_KEY_REPORT_MODEL
 
 import json
 import os
