@@ -1,19 +1,23 @@
-"""HIDANE Classroom Intelligence — 疑惑タグ抽出ダッシュボード
+"""ヒダネ 授業みまもりAI — 教室長が見る画面
 
-使い方:
+起動:
     source ../.venv/bin/activate
     streamlit run dashboard/app.py
 
-ビュー:
-    - 授業詳細（疑惑タグ）  ← メインビュー（教室長レビュー用）
-    - 動画投入
-    - 社長ビュー（全教室俯瞰）
-    - 教室長ビュー / 講師ビュー（旧スコア参照用・廃止予定）
-    - 管理
+画面:
+    - 🎬 授業を見る    ← 主画面（AIが選んだ確認ポイントから動画に飛ぶ）
+    - 📤 動画を送る
+    - 🏫 全教室の様子
+    - 👥 うちの教室 / 👤 わたしの授業
+    - ⚙️ 設定
+
+このツールはAIが授業を採点しない（2026-05-07 に採点方式を廃止）。
+AIは「ここを見た方がいい」場面を選ぶだけで、よい・わるいの判断は
+教室長が動画を見て行う。画面の文言もその前提で書く。
 
 更新履歴:
-    2026-05-07 v2: AI採点廃止 → 疑惑タグ抽出方式へ刷新
-    2026-05-07 v3: Vision判定優先＋ low severity 折りたたみ（精度改善）
+    2026-05-07 採点廃止 → 確認ポイント方式へ
+    2026-09-02 画面の言葉を教室長向けに全面見直し／問いかけ回数の誤表示を修正
 """
 from __future__ import annotations
 
@@ -1317,7 +1321,7 @@ def render_subject_badge(lesson: dict) -> None:
     subject_conf = lesson.get("subject_confidence")
 
     if subject_ai is None and subject_topic is None:
-        st.caption("（教科判定なし — このレッスンには教科推定データがありません）")
+        st.caption("この授業は、教科をAIが判定できませんでした。")
         return
 
     try:
@@ -1344,31 +1348,74 @@ def render_subject_badge(lesson: dict) -> None:
     )
 
 
-def render_question_summary(lesson: dict) -> None:
-    """問いかけ量（合計 / open / closed）の3カードを描画。
+def question_display_state(lesson: dict) -> str:
+    """問いかけ回数をどう見せるかを決める。表示と分けてテストできるようにした純関数。
 
-    新カラム未存在時はセクションごと出さない（None なら抜ける）。
+    返り値:
+        "hide"       — 列そのものが無い（古いDB）。セクションごと出さない
+        "unmeasured" — 声は出ているのに全部0＝数えられていない。「—」を出す
+        "show"       — 実数を出してよい
     """
     q_total = lesson.get("question_total")
     q_open = lesson.get("question_open")
     q_closed = lesson.get("question_closed")
 
     if q_total is None and q_open is None and q_closed is None:
+        return "hide"
+
+    try:
+        speech_sec = float(lesson.get("speech_sec") or 0)
+    except (TypeError, ValueError):
+        speech_sec = 0.0
+
+    all_zero = not any((v or 0) > 0 for v in (q_total, q_open, q_closed))
+    if speech_sec > 0 and all_zero:
+        return "unmeasured"
+    return "show"
+
+
+def render_question_summary(lesson: dict) -> None:
+    """先生が生徒に問いかけた回数を3枚のカードで出す。
+
+    2026-09-02 修正（本番画面で誤表示を確認）:
+    本番4授業すべてが 0/0/0 で、画面に「合計 0回」と事実のように出ていた。
+    実際は文字起こしに「誰だ?」「何だって?」があり、発話も105秒ある。
+    原因は本番の解析経路が問いかけを数えていなかったこと（worker側で修正済み）。
+
+    数えられていない古い授業まで「0回」と出すと、その先生が一度も
+    問いかけなかったという誤解を生む。**声が出ている授業で0なら未計測**と
+    判断して「—」を出す（speech_sec が根拠。当てずっぽうではない）。
+    本当に問いかけ0の授業は、声が出ていれば同じく「—」になるが、
+    事実でない0を突きつけるより害が小さい。workerの修正後は実数が入る。
+    """
+    q_total = lesson.get("question_total")
+    q_open = lesson.get("question_open")
+    q_closed = lesson.get("question_closed")
+
+    state = question_display_state(lesson)
+    if state == "hide":
         return
 
     st.markdown("---")
-    st.subheader("🎤 問いかけ量")
+    st.subheader("🎤 先生が問いかけた回数")
+
+    if state == "unmeasured":
+        st.caption("この授業はまだ数えていません（古い授業のため）。"
+                   "次に解析する授業から回数が出ます。")
+        return
+
+    def _n(v: object) -> str:
+        return f"{v}回" if v is not None else "—"
 
     cols = st.columns(3)
     with cols[0]:
-        kpi_card("合計", f"{q_total if q_total is not None else '—'}回",
-                 "授業全体の問いかけ", BRAND_PRIMARY)
+        kpi_card("ぜんぶで", _n(q_total), "授業のあいだの問いかけ", BRAND_PRIMARY)
     with cols[1]:
-        kpi_card("オープン", f"{q_open if q_open is not None else '—'}回",
-                 "思考を促す問いかけ", BRAND_SECONDARY)
+        kpi_card("考えさせる問いかけ", _n(q_open),
+                 "「なぜ」「どう思う」など", BRAND_SECONDARY)
     with cols[2]:
-        kpi_card("クローズ", f"{q_closed if q_closed is not None else '—'}回",
-                 "Yes/Noや一問一答", BRAND_ACCENT)
+        kpi_card("はい/いいえで答える問いかけ", _n(q_closed),
+                 "「わかりましたか」など", BRAND_ACCENT)
 
 
 def render_checklist_two_blocks(cs_df: pd.DataFrame, lesson_id: str) -> None:
