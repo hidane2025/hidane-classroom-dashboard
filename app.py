@@ -985,8 +985,12 @@ def clean_description(desc: str, label: str) -> str:
     for mark in ("🔴", "🟡", "⚪", "🟠", "🔵"):
         if out.startswith(mark):
             out = out[len(mark):].lstrip()
-    if label and out.startswith(label):
-        out = out[len(label):].lstrip("　 :：")
+    # 表示名は「長い沈黙（音声）」のように括弧付きのことがあり、保存されている
+    # ラベル「長い沈黙」と一致しない。括弧を落とした形でも照合する。
+    for cand in (label, (label or "").split("（")[0].strip()):
+        if cand and out.startswith(cand):
+            out = out[len(cand):].lstrip("　 :：")
+            break
     return out
 
 
