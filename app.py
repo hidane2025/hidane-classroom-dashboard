@@ -195,7 +195,7 @@ def load_all_lessons() -> pd.DataFrame:
         )
         return df
     except Exception as exc:  # noqa: BLE001
-        st.error(f"DB取得エラー: {exc}")
+        st.error("データを読み込めませんでした。少し待ってから画面を開き直してください。直らない場合はヒダネにご連絡ください。")
         return pd.DataFrame()
 
 
@@ -396,7 +396,7 @@ def view_ceo():
     cols = st.columns(4)
     with cols[0]:
         kpi_card("今週の確認ポイント", f"{this_hm}件",
-                 f"先週比 {delta_hm:+d}件（high+medium）",
+                 f"先週比 {delta_hm:+d}件（重要＋注意）",
                  BRAND_PRIMARY if this_hm > 0 else "#16A34A")
     with cols[1]:
         # high疑惑が3件以上ある講師数（要1on1候補）
@@ -600,7 +600,7 @@ def view_manager():
             st.metric(
                 "最新授業の確認ポイント",
                 f"{high_n + med_n}件",
-                f"🔴 high {high_n} / 🟡 medium {med_n}",
+                f"🔴 重要 {high_n} / 🟡 注意 {med_n}",
             )
             try:
                 date_str = latest["lesson_date"].strftime("%Y-%m-%d")
@@ -652,7 +652,7 @@ def view_manager():
                             after_checklist=after_cs.to_dict("records") if not after_cs.empty else [],
                         )
                     if result.error:
-                        st.error(f"比較失敗: {result.error}")
+                        st.error("2つの授業をくらべられませんでした。もう一度お試しいただくか、別の授業を選んでください。")
                     else:
                         cols = st.columns(3)
                         with cols[0]:
@@ -730,7 +730,7 @@ def view_teacher():
             BRAND_PRIMARY if latest_hm > 0 else "#16A34A",
         )
     with cols[1]:
-        kpi_card("🔴 high", f"{int(latest['high_count'])}件", "", BRAND_SECONDARY)
+        kpi_card("🔴 重要", f"{int(latest['high_count'])}件", "", BRAND_SECONDARY)
     with cols[2]:
         kpi_card(
             "今月の授業本数",
@@ -787,7 +787,7 @@ def view_teacher():
                     checklist_avg=checklist_avg_map,
                 )
                 if resp.error:
-                    st.error(f"AIコーチが応答できませんでした: {resp.error}")
+                    st.error("AIが答えられませんでした。少し待ってからもう一度お試しください。")
                 else:
                     st.markdown(resp.answer)
 
@@ -832,7 +832,7 @@ def view_admin():
                 new_room_region = st.text_input("地域", placeholder="例: 愛知県東部")
             if st.form_submit_button("登録", type="primary"):
                 if not new_room_name.strip():
-                    st.warning("教室名は必須です")
+                    st.warning("教室名を入力してください。")
                 else:
                     r = create_classroom(name=new_room_name.strip(), region=new_room_region.strip() or None)
                     if r.get("error"):
@@ -856,7 +856,7 @@ def view_admin():
                         st.cache_data.clear()
                         st.rerun()
                     else:
-                        st.error("非アクティブ化失敗")
+                        st.error("この操作ができませんでした。画面を開き直してからもう一度お試しください。")
 
     # ====== 講師マスタ ======
     with tab2:
@@ -892,7 +892,7 @@ def view_admin():
                     new_t_rank = st.selectbox("階級", ["新人", "中堅", "ベテラン", "教室長"])
                 if st.form_submit_button("登録", type="primary"):
                     if not new_t_name.strip():
-                        st.warning("講師名は必須です")
+                        st.warning("講師名を入力してください。")
                     else:
                         r = create_teacher(
                             name=new_t_name.strip(),
@@ -922,7 +922,7 @@ def view_admin():
                         st.cache_data.clear()
                         st.rerun()
                     else:
-                        st.error("非アクティブ化失敗")
+                        st.error("この操作ができませんでした。画面を開き直してからもう一度お試しください。")
 
     # ====== 授業履歴 ======
     with tab3:
@@ -1004,7 +1004,7 @@ def view_lesson_detail():
 
     lesson = fetch_lesson_detail(lesson_id)
     if not lesson:
-        st.error("授業データが取得できませんでした")
+        st.error("この授業のデータを読み込めませんでした。画面を開き直すか、別の授業を選んでください。")
         return
 
     # session state でシーク制御
@@ -1132,9 +1132,8 @@ def view_lesson_detail():
             )
         else:
             st.info(
-                "📹 動画は未アップロードです。"
-                "`python scripts/upload_lesson_media.py` で Supabase Storage にアップロード後、"
-                "ここに表示されます。"
+                "📹 この授業の動画はまだ登録されていません。"
+                "「📤 動画を送る」からアップロードすると、ここで再生できるようになります。"
             )
 
     with col_e:
@@ -1181,7 +1180,7 @@ def view_lesson_detail():
             med_count = sum(1 for e in events if e.get("severity") == "medium")
             low_count = sum(1 for e in events if e.get("severity") == "low")
             st.caption(
-                f"📊 計 **{len(events)}件** ｜ 🔴high {high_count} / 🟡medium {med_count} / ⚪low {low_count}"
+                f"📊 全 **{len(events)}件** ｜ 🔴重要 {high_count} / 🟡注意 {med_count} / ⚪軽め {low_count}"
             )
             st.caption(
                 f"📹 まず見る場面 **{len(tier1_vision_ok)}件** / 🎤 会話から **{len(tier2_audio)}件** "
@@ -1327,7 +1326,7 @@ def render_subject_badge(lesson: dict) -> None:
         conf_value = 0.0
 
     if conf_value < 0.6:
-        st.warning("AIでは判断できませんでした（自信が足りません）")
+        st.warning("AIでは判断がつきませんでした。動画でご確認ください。")
         if subject_ai or subject_topic:
             st.caption(f"参考: {subject_ai or '—'} / {subject_topic or '—'}")
         return
@@ -1691,7 +1690,7 @@ def view_upload():
             )
 
         if result.get("error"):
-            st.error(f"アップロード失敗: {result['error']}")
+            st.error("動画を送れませんでした。ファイルの大きさと形式（mkv / mp4）をご確認のうえ、もう一度お試しください。直らない場合はヒダネにご連絡ください。")
         else:
             st.success(
                 f"✅ アップロード完了！lesson_id: `{result['lesson_id']}`\n\n"
@@ -1743,7 +1742,7 @@ VIEWS = {
 }
 
 
-DASHBOARD_VERSION = "v2026-07-02-v10 (信頼性強化: 状態遷移・failed可視化)"
+DASHBOARD_VERSION = "v2026-09-02"
 
 
 def main():
@@ -1752,22 +1751,16 @@ def main():
             f"<div style='color: {BRAND_SECONDARY}; font-size: 11px; letter-spacing: 0.2em;'>ヒダネ 授業みまもりAI</div>",
             unsafe_allow_html=True,
         )
-        st.markdown("## 🎓 授業品質管理")
+        st.markdown("## 🎓 授業みまもりAI")
         view_name = st.radio("メニュー", list(VIEWS.keys()))
         st.markdown("---")
-        # 🔖 バージョンスタンプ（新コード反映確認用）
-        st.markdown(
-            f"<div style='background:#FEF3C7;border-left:4px solid #F59E0B;"
-            f"padding:8px 12px;border-radius:4px;font-size:11px;color:#92400E;'>"
-            f"🔖 <b>{DASHBOARD_VERSION}</b><br>"
-            f"このスタンプが見えていれば新UI反映済</div>",
-            unsafe_allow_html=True,
-        )
-        st.caption(f"更新時刻 {datetime.now().strftime('%H:%M:%S')}")
+        # 2026-09-02: 開発用のバージョンスタンプ（「このスタンプが見えていれば新UI反映済」）
+        # を撤去。客（教室長・塾社長）の画面に開発者向けの情報を出さない。
+        # 版の確認が必要なときは st.caption に控えめに出す。
         if not _db_available():
-            st.error("DB未接続")
+            st.error("⚠️ データにつながっていません。ヒダネにご連絡ください。")
         else:
-            st.success("DB接続中")
+            st.caption(f"最終更新 {datetime.now().strftime('%H:%M')}　{DASHBOARD_VERSION}")
 
     VIEWS[view_name]()
 
