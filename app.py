@@ -1153,11 +1153,18 @@ def view_lesson_detail():
         elif lesson_status == "analyzing":
             st.info("🔄 いまAIがこの動画を確認しています。数分お待ちください（画面を開き直すと進みます）。")
         elif lesson_status == "failed":
+            # 2026-09-02: 以前はここに例外の英文をそのまま出していた。
+            # 教室長は読んでも意味が取れず、対処にもつながらない。
+            # やることを先に書き、原文はヒダネに渡す用として畳んでおく。
             st.error(
-                "❌ この動画の確認は**エラーになりました**。\n\n"
-                f"エラー内容: {lesson.get('notes') or '（記録なし）'}\n\n"
-                "お手数ですが「📤 動画を送る」からもう一度送るか、ヒダネにご連絡ください。"
+                "❌ この動画は、うまく確認できませんでした。\n\n"
+                "お手数ですが「📤 動画を送る」からもう一度送ってください。"
+                "それでも直らない場合は、ヒダネにご連絡ください。"
             )
+            detail = lesson.get("notes")
+            if detail:
+                with st.expander("ヒダネに伝える内容（そのままお送りください）"):
+                    st.code(str(detail), language=None)
         elif not events:
             st.success("✅ 確認ポイントはありません（AIは気になる場面を見つけませんでした）")
             st.caption("※ AIの確認が終わって0件なら、気になる場面は見つからなかったということです。")
@@ -1679,7 +1686,7 @@ def render_timeline_view(lesson_id: str, lesson: dict) -> None:
 # ビュー: 動画投入（クライアントセルフサービス）
 # ==========================================================
 def view_upload():
-    render_brand_header("📤 動画を送る — 授業の録画をアップロード")
+    render_brand_header("📤 動画を送る — 授業の録画をAIに送ります")
 
     if not _db_available():
         render_no_db_notice()
@@ -1689,7 +1696,7 @@ def view_upload():
         "授業の録画を送ると、AIが自動で中身を確認します（ふつう5〜15分）。\n\n"
         f"送れるのは **mkv か mp4** で、1本 **{STORAGE_MAX_UPLOAD_MB}MB まで**"
         f"（ふつうの画質でおよそ **{STORAGE_MAX_MINUTES}分ぶん**）。\n\n"
-        "これより長い授業は、下の説明のとおり分けて送ってください。"
+        f"これより長い授業は、{STORAGE_MAX_MINUTES}分くらいずつに分けて、1本ずつ送ってください。"
     )
 
     classrooms = fetch_all_classrooms()
@@ -1781,10 +1788,10 @@ def view_upload():
                 "授業日": p.get("lesson_date", "—"),
                 "ファイル": p.get("video_filename", "—"),
                 "状態": STATUS_JA.get(status, status),
-                "エラー": (p.get("notes") or "")[:60] if status == "failed" else "",
+                "ヒダネに伝える内容": (p.get("notes") or "")[:60] if status == "failed" else "",
             })
         if failed_count:
-            st.error(f"❌ エラーになった動画が {failed_count} 件あります。もう一度アップロードするか、ヒダネにご連絡ください。")
+            st.error(f"❌ うまく確認できなかった動画が {failed_count} 件あります。もう一度送るか、ヒダネにご連絡ください。")
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
