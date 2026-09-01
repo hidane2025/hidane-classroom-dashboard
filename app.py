@@ -1089,22 +1089,25 @@ def view_lesson_detail():
                         if e.get("vision_confirmed") is True and e.get("kind") in VISUAL_KINDS)
     audio_hdr = sum(1 for e in events if e.get("kind") in AUDIO_KINDS)
 
+    # 2026-09-02: 以前は左端が「📹 まず見る場面 0件」だった。教室長が最初に見る
+    # 数字が0では、何をすればよいか伝わらない（実測: 本番の授業は 0件 / 8件 で、
+    # 実際に見るべきは8件なのに0が主役になっていた）。
+    # 左端は「動画で見てほしい場面の合計」にし、内訳はその右に置く。
+    review_hdr = vision_ok_hdr + audio_hdr
     cols = st.columns(4)
     with cols[0]:
-        # 📹 Vision確認 件数（最優先指標）
         kpi_card(
-            "📹 まず見る場面",
-            f"{vision_ok_hdr}件",
-            "AIが映像で確かめた場面",
-            BRAND_PRIMARY if vision_ok_hdr > 0 else "#94a3b8",
+            "動画で見てほしい場面",
+            f"{review_hdr}件",
+            "AIが選んだ、確認をおすすめする場面",
+            BRAND_PRIMARY if review_hdr > 0 else "#94a3b8",
         )
     with cols[1]:
-        # 🎤 音声疑惑 件数（次点指標）
         kpi_card(
-            "🎤 会話から",
-            f"{audio_hdr}件",
-            "会話の内容から見つけた場面",
-            BRAND_SECONDARY if audio_hdr > 0 else "#94a3b8",
+            "うち 映像から",
+            f"{vision_ok_hdr}件",
+            f"のこり{audio_hdr}件は会話から",
+            BRAND_SECONDARY if vision_ok_hdr > 0 else "#94a3b8",
         )
     with cols[2]:
         kpi_card(
@@ -1131,8 +1134,8 @@ def view_lesson_detail():
             # start_time 指定で該当イベント位置から再生
             st.video(playback_url, start_time=int(st.session_state.seek_sec))
             st.caption(
-                f"現在の再生開始位置: {int(st.session_state.seek_sec)//60}:"
-                f"{int(st.session_state.seek_sec)%60:02d}"
+                f"{int(st.session_state.seek_sec)//60}分"
+                f"{int(st.session_state.seek_sec)%60:02d}秒から再生します"
             )
         else:
             st.info(
@@ -1179,18 +1182,25 @@ def view_lesson_detail():
                 else:
                     tier_other.append(e)
 
-            # サマリ: high/medium/low と Vision内訳
-            high_count = sum(1 for e in events if e.get("severity") == "high")
-            med_count = sum(1 for e in events if e.get("severity") == "medium")
-            low_count = sum(1 for e in events if e.get("severity") == "low")
-            st.caption(
-                f"📊 全 **{len(events)}件** ｜ 🔴重要 {high_count} / 🟡注意 {med_count} / ⚪軽め {low_count}"
+            # サマリ。2026-09-02 修正: 以前は同じ件数を2通りに割った行が並んでいた
+            # （「全14件｜重要4/注意5/軽め5」と「まず見る場面0/会話から8/問題なし6」）。
+            # 合計は同じ14でも分け方が違うため、どちらが「見る数」なのか読めなかった。
+            # 見る数＝tier1＋tier2＋その他 に一本化し、重要度もその範囲だけで数える。
+            review_events = tier1_vision_ok + tier2_audio + tier_other
+            high_count = sum(1 for e in review_events if e.get("severity") == "high")
+            med_count = sum(1 for e in review_events if e.get("severity") == "medium")
+            low_count = sum(1 for e in review_events if e.get("severity") == "low")
+            st.markdown(
+                f"**動画で見てほしい場面は {len(review_events)}件です。**"
+                f"（🔴 重要 {high_count}件 / 🟡 注意 {med_count}件 / ⚪ 軽め {low_count}件）"
             )
-            st.caption(
-                f"📹 まず見る場面 **{len(tier1_vision_ok)}件** / 🎤 会話から **{len(tier2_audio)}件** "
-                f"／ ⚪ 問題なし {len(tier3_vision_ng)}件"
-            )
-            st.caption("「▶ 再生」を押すとその場面に飛びます。よい・わるいの判断は、動画を見てご自身でお願いします。")
+            if tier3_vision_ng:
+                st.caption(
+                    f"このほかに、AIが「問題なし」と判断した場面が {len(tier3_vision_ng)}件 あります"
+                    "（下のほうで開けます）。"
+                )
+            st.caption("「▶ 再生」を押すと、その場面から動画が始まります。"
+                       "よい・わるいの判断は、動画を見てご自身でお願いします。")
 
             sev_order = {"high": 0, "medium": 1, "low": 2}
 
